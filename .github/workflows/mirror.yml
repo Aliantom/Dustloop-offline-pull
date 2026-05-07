@@ -1,0 +1,75 @@
+name: Mirror Dustloop GGST Wiki
+
+# Runs daily and uploads the mirror as a downloadable artifact.
+# Triggers:
+#   - Scheduled: 07:00 UTC every day (adjust the cron line below)
+#   - Manual:    "Run workflow" button on the Actions tab
+#
+# Output: a tar.gz artifact you can download from the workflow run page.
+
+on:
+  schedule:
+    - cron: '0 7 * * *'   # 07:00 UTC daily — pick a quiet hour
+  workflow_dispatch:        # lets you trigger it by hand from the Actions tab
+
+# Only one mirror at a time, and let the running one finish if a new run starts
+concurrency:
+  group: dustloop-mirror
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120   # generous ceiling; first run takes the longest
+
+    steps:
+      - name: Check out the repo (so the script is available)
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Persist the mirror folder between runs so --timestamping works.
+      # Without this, every daily run would re-download the whole wiki — slow
+      # and impolite to Dustloop's servers. With it, daily runs only fetch
+      # what's actually changed.
+      #
+      # The cache key uses run_id (always unique), so we always save a fresh
+      # cache; restore-keys grabs the most recent prior cache to seed the run.
+      # GitHub auto-evicts caches not accessed in 7 days, so this self-cleans.
+      - name: Restore previous mirror from cache
+        uses: actions/cache@v4
+        with:
+          path: ~/dustloop_mirror
+          key: dustloop-mirror-${{ github.run_id }}
+          restore-keys: |
+            dustloop-mirror-
+
+      - name: wget version (sanity check)
+        run: wget --version | head -n 1
+
+      - name: Run the mirror script
+        run: python dustloop_mirror.py
+
+      - name: Show what was downloaded
+        run: |
+          echo "Mirror size:"
+          du -sh ~/dustloop_mirror || true
+          echo "Top-level layout:"
+          ls -la ~/dustloop_mirror || true
+
+      - name: Compress the mirror
+        run: |
+          cd ~
+          tar -czf dustloop_mirror.tar.gz dustloop_mirror
+          ls -lh dustloop_mirror.tar.gz
+
+      - name: Upload as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dustloop-mirror
+          path: ~/dustloop_mirror.tar.gz
+          retention-days: 30   # tweak as you like; max 90 on free tier
+          if-no-files-found: error
