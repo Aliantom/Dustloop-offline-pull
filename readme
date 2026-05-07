@@ -1,0 +1,166 @@
+# Dustloop GGST Wiki — Offline Mirror
+
+A small Python script that mirrors the **Guilty Gear -Strive-** section of [dustloop.com](https://www.dustloop.com/w/Guilty_Gear_-Strive-) for offline reading. Runs on a schedule (e.g. daily) and only re-downloads pages that have changed.
+
+The output is plain HTML with all images/CSS/JS, viewable in any browser — no server needed. Just open `~/dustloop_mirror/index.html`.
+
+---
+
+## Requirements
+
+- **Python 3.8+**
+- **wget** (the script uses wget under the hood — it's the right tool for recursive mirroring)
+
+### Installing wget
+
+| Platform | Command |
+|---|---|
+| macOS | `brew install wget` |
+| Ubuntu/Debian | `sudo apt install wget` |
+| Fedora | `sudo dnf install wget` |
+| Windows | `choco install wget` (Chocolatey), or use Git Bash, or use WSL |
+
+Verify it works: `wget --version`
+
+---
+
+## First run
+
+```bash
+python dustloop_mirror.py
+```
+
+Expect the **first run to take 30–90 minutes** depending on your connection. It's downloading the entire GGST wiki (every character page, every system page, all the frame data, all the images). The script intentionally waits ~1 second between requests to be polite to Dustloop's servers — please don't lower this.
+
+When it's done you'll have:
+
+```
+~/dustloop_mirror/
+├── index.html        ← open this
+├── mirror.log        ← run history
+└── site/
+    ├── w/            ← wiki pages
+    ├── images/       ← character art, hitboxes, etc.
+    └── ...
+```
+
+Subsequent runs are **much faster** (usually a few minutes) because wget's `--timestamping` flag skips files that haven't changed on the server.
+
+---
+
+## Scheduling daily updates
+
+Pick the section for your OS.
+
+### macOS / Linux (cron)
+
+Edit your crontab:
+
+```bash
+crontab -e
+```
+
+Add a line to run it every day at 3 AM:
+
+```
+0 3 * * * /usr/bin/python3 /path/to/dustloop_mirror.py >> ~/dustloop_mirror/cron.log 2>&1
+```
+
+Replace `/path/to/dustloop_mirror.py` with the actual path. Find your Python with `which python3`.
+
+### macOS (launchd — alternative to cron)
+
+If cron is being unreliable on modern macOS, use launchd. Save this as `~/Library/LaunchAgents/com.user.dustloopmirror.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>            <string>com.user.dustloopmirror</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>/path/to/dustloop_mirror.py</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>   <integer>3</integer>
+    <key>Minute</key> <integer>0</integer>
+  </dict>
+  <key>StandardOutPath</key>  <string>/tmp/dustloop.out</string>
+  <key>StandardErrorPath</key><string>/tmp/dustloop.err</string>
+</dict>
+</plist>
+```
+
+Load it:
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.user.dustloopmirror.plist
+```
+
+### Windows (Task Scheduler)
+
+1. Open **Task Scheduler** → **Create Basic Task**
+2. Name: `Dustloop Mirror`
+3. Trigger: **Daily**, pick a time (3 AM is fine)
+4. Action: **Start a program**
+   - Program/script: `python` (or full path to `python.exe`)
+   - Add arguments: `C:\path\to\dustloop_mirror.py`
+   - Start in: `C:\path\to\` (the folder containing the script)
+5. Finish, then right-click the task → Properties → check **"Run whether user is logged on or not"** if you want it to run even when you're not signed in
+
+---
+
+## Moving the mirror to your work machine
+
+Since dustloop is blocked at work, you have a few options:
+
+- **USB drive** — simplest. Copy the whole `~/dustloop_mirror` folder. Open `index.html`.
+- **Cloud sync** — Dropbox, OneDrive, Google Drive, etc., if your workplace allows them. Point the script's `OUTPUT_DIR` at a folder inside your sync directory (edit it at the top of `dustloop_mirror.py`).
+- **Self-hosted** — if you have a personal server/VPS, put the mirror behind a simple HTTP server and access via your phone's browser.
+
+---
+
+## Customization
+
+All settings are at the top of `dustloop_mirror.py`:
+
+| Setting | Default | What it does |
+|---|---|---|
+| `BASE_URL` | GGST main page | Change to mirror a different game (`/w/BlazBlue_Central_Fiction`, etc.) |
+| `OUTPUT_DIR` | `~/dustloop_mirror` | Where files go |
+| `WAIT_BETWEEN_REQUESTS` | `1` | Seconds between requests. **Don't lower this.** |
+| `INCLUDE_DIRS` | wiki + assets | Paths wget is allowed to descend into |
+| `REJECT_REGEX` | edit/history/etc. | URL patterns to skip (saves a lot of space) |
+
+To mirror multiple games, copy the script and change `BASE_URL` and `OUTPUT_DIR` in each copy.
+
+---
+
+## Troubleshooting
+
+**"wget is not installed"** — install it (see Requirements above) and make sure `wget --version` works in your terminal.
+
+**Mirror seems incomplete / missing pages** — check `mirror.log`. If you see lots of "404" or "robots.txt" entries, some pages may legitimately not exist or may be excluded by the wiki. If a specific section is missing, you may need to widen `INCLUDE_DIRS` in the script.
+
+**Images aren't loading offline** — wget's `--convert-links` should handle this, but it only runs *after* the full crawl finishes. If you interrupted the script, links won't be rewritten. Just run it again to completion.
+
+**Daily runs are slow** — they shouldn't be. If they're as slow as the first run, `--timestamping` isn't working. Check that the existing `site/` directory wasn't deleted between runs.
+
+**Disk usage** — expect 1–3 GB total. Frame data images are the bulk of it.
+
+---
+
+## A note on etiquette
+
+Dustloop is maintained by volunteers and funded by donations. This script is for **personal offline use** — please don't redistribute the mirror, don't run it more than once a day, and consider [donating to Dustloop](https://www.dustloop.com/wiki/index.php?title=Dustloop_Wiki:About) if you find it useful. The 1-second wait between requests is there for a reason; it keeps the load on their servers minimal.
+
+---
+
+## What this script does *not* do
+
+- It doesn't bypass any network filtering at your workplace. It downloads the site somewhere else (your home machine), and you're responsible for getting that copy onto your work machine in a way that complies with your workplace's policies.
+- It doesn't archive page edit history, talk pages, or user pages (those are excluded by `REJECT_REGEX` to keep the mirror small and focused).
+- It doesn't produce a PDF. If you really want PDFs of specific pages, your browser's "Save as PDF" feature works fine on the offline copy.
