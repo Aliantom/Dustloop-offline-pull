@@ -20,7 +20,7 @@ concurrency:
 jobs:
   mirror:
     runs-on: ubuntu-latest
-    timeout-minutes: 120   # generous ceiling; first run takes the longest
+    timeout-minutes: 300   # generous ceiling; first run takes the longest
 
     steps:
       - name: Check out the repo (so the script is available)
