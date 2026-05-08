@@ -2,17 +2,14 @@ name: Mirror Dustloop GGST Wiki
 
 # Runs daily and uploads the mirror as a downloadable artifact.
 # Triggers:
-#   - Scheduled: 07:00 UTC every day (adjust the cron line below)
+#   - Scheduled: 07:00 UTC every day
 #   - Manual:    "Run workflow" button on the Actions tab
-#
-# Output: a tar.gz artifact you can download from the workflow run page.
 
 on:
   schedule:
-    - cron: '0 7 * * *'   # 07:00 UTC daily — pick a quiet hour
-  workflow_dispatch:        # lets you trigger it by hand from the Actions tab
+    - cron: '0 7 * * *'
+  workflow_dispatch:
 
-# Only one mirror at a time, and let the running one finish if a new run starts
 concurrency:
   group: dustloop-mirror
   cancel-in-progress: false
@@ -20,10 +17,13 @@ concurrency:
 jobs:
   mirror:
     runs-on: ubuntu-latest
-    timeout-minutes: 300   # generous ceiling; first run takes the longest
+    # GitHub free-tier hard cap is 6 hours per job; 350 minutes leaves headroom.
+    # The bootstrap (first full mirror) may need 1-3 runs of this length.
+    # Daily incremental runs after bootstrap finish in minutes.
+    timeout-minutes: 350
 
     steps:
-      - name: Check out the repo (so the script is available)
+      - name: Check out the repo
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -31,16 +31,12 @@ jobs:
         with:
           python-version: '3.11'
 
-      # Persist the mirror folder between runs so --timestamping works.
-      # Without this, every daily run would re-download the whole wiki — slow
-      # and impolite to Dustloop's servers. With it, daily runs only fetch
-      # what's actually changed.
-      #
-      # The cache key uses run_id (always unique), so we always save a fresh
-      # cache; restore-keys grabs the most recent prior cache to seed the run.
-      # GitHub auto-evicts caches not accessed in 7 days, so this self-cleans.
+      # Cache is split into restore + save so we can save UNCONDITIONALLY.
+      # The default actions/cache@v4 only saves on success — useless here,
+      # because long bootstrap runs can hit the timeout, and we'd lose progress.
       - name: Restore previous mirror from cache
-        uses: actions/cache@v4
+        id: cache-restore
+        uses: actions/cache/restore@v4
         with:
           path: ~/dustloop_mirror
           key: dustloop-mirror-${{ github.run_id }}
@@ -50,26 +46,71 @@ jobs:
       - name: wget version (sanity check)
         run: wget --version | head -n 1
 
-      - name: Run the mirror script
-        run: python dustloop_mirror.py
+      - name: Show what we restored from cache (if anything)
+        run: |
+          if [ -d ~/dustloop_mirror ]; then
+            echo "Cache hit — resuming from previous mirror state:"
+            du -sh ~/dustloop_mirror
+            find ~/dustloop_mirror/site -type f 2>/dev/null | wc -l | xargs echo "Files in mirror:"
+          else
+            echo "No cache — starting fresh."
+          fi
+
+      # Run the script with an internal time budget shorter than the job timeout.
+      # If wget hits the budget, we exit cleanly so the cache-save step still
+      # runs and partial progress survives. We do NOT fail the job on timeout
+      # for the same reason.
+      - name: Run the mirror script (with 5h budget)
+        run: |
+          set +e
+          timeout 18000 python dustloop_mirror.py
+          code=$?
+          set -e
+          case "$code" in
+            0)   echo "Mirror completed successfully." ;;
+            124) echo "::warning::Mirror hit 5h time budget — cache will be saved and resumed next run." ;;
+            *)   echo "::warning::Mirror exited with code $code — cache will still be saved." ;;
+          esac
+          # Always succeed so the rest of the job runs.
+          exit 0
 
       - name: Show what was downloaded
+        if: always()
         run: |
           echo "Mirror size:"
-          du -sh ~/dustloop_mirror || true
+          du -sh ~/dustloop_mirror 2>/dev/null || echo "(no mirror dir)"
+          echo "Files in mirror:"
+          find ~/dustloop_mirror -type f 2>/dev/null | wc -l
           echo "Top-level layout:"
-          ls -la ~/dustloop_mirror || true
+          ls -la ~/dustloop_mirror 2>/dev/null || true
+
+      # Save cache UNCONDITIONALLY (note `if: always()`). This is the critical
+      # difference from the previous workflow — even on timeout, partial
+      # progress is preserved for the next run.
+      - name: Save mirror to cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ~/dustloop_mirror
+          key: dustloop-mirror-${{ github.run_id }}
 
       - name: Compress the mirror
+        if: always()
         run: |
-          cd ~
-          tar -czf dustloop_mirror.tar.gz dustloop_mirror
-          ls -lh dustloop_mirror.tar.gz
+          if [ -d ~/dustloop_mirror ]; then
+            cd ~
+            tar -czf dustloop_mirror.tar.gz dustloop_mirror
+            ls -lh dustloop_mirror.tar.gz
+          else
+            echo "No mirror to compress."
+            exit 1
+          fi
 
       - name: Upload as workflow artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: dustloop-mirror
           path: ~/dustloop_mirror.tar.gz
-          retention-days: 30   # tweak as you like; max 90 on free tier
-          if-no-files-found: error
+          retention-days: 30
+          if-no-files-found: warn
