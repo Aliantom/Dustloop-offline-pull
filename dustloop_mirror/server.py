@@ -5,8 +5,10 @@ from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse, unquote
 
 LANDING_PAGE = '/w/Guilty_Gear_-Strive-'
+BASE_DIR = os.path.realpath(os.path.dirname(os.path.abspath(__file__)))
 
-class H(SimpleHTTPRequestHandler):
+
+class WikiRequestHandler(SimpleHTTPRequestHandler):
     def do_GET(self):
         if self.path in ('/', ''):
             self.send_response(302)
@@ -17,11 +19,20 @@ class H(SimpleHTTPRequestHandler):
 
     def translate_path(self, path):
         rel = unquote(urlparse(path).path).lstrip('/')
-        base = os.getcwd()
+        base = BASE_DIR
+
+        def safe(p):
+            """Return realpath of p only if it stays within base, else None."""
+            real = os.path.realpath(p)
+            if real == base or real.startswith(base + os.sep):
+                return real
+            return None
 
         # Standard candidates
         for c in (rel, f"site/{rel}", f"{rel}.html", f"site/{rel}.html"):
-            full = os.path.join(base, c)
+            full = safe(os.path.join(base, c))
+            if full is None:
+                continue
             if os.path.isfile(full):
                 return full
             if rel == '' and os.path.isdir(full):
@@ -35,11 +46,11 @@ class H(SimpleHTTPRequestHandler):
                 # rel looks like: wiki/images/X/XY/Filename.png
                 # we want:       site/wiki/images/thumb/X/XY/Filename.png/
                 idx = parts.index('images')
-                thumb_dir = os.path.join(
+                thumb_dir = safe(os.path.join(
                     base, 'site', 'wiki', 'images', 'thumb',
                     *parts[idx+1:]
-                )
-                if os.path.isdir(thumb_dir):
+                ))
+                if thumb_dir and os.path.isdir(thumb_dir):
                     def size_key(name):
                         try:
                             return int(name.split('px-')[0])
@@ -51,8 +62,10 @@ class H(SimpleHTTPRequestHandler):
             except (ValueError, OSError):
                 pass
 
-        return os.path.join(base, rel)
+        fallback = safe(os.path.join(base, rel))
+        return fallback if fallback is not None else base
+
 
 port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
-print(f"Serving Dustloop mirror on port {port}")
-ThreadingHTTPServer(('0.0.0.0', port), H).serve_forever()
+print(f"Serving Dustloop mirror on http://127.0.0.1:{port}")
+ThreadingHTTPServer(('127.0.0.1', port), WikiRequestHandler).serve_forever()

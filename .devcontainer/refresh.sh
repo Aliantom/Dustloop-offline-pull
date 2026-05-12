@@ -13,7 +13,7 @@ if [ -f "$MARKER" ] && [ "$(cat "$MARKER")" = "$TODAY" ]; then
 fi
 
 echo "[refresh] Pulling fresh mirror for $TODAY..."
-cd /workspaces/Dustloop-offline-pull
+cd "$(dirname "$0")/.."
 rm -f dustloop_mirror.tar.gz
 
 if gh run download --name dustloop-mirror 2>/dev/null; then

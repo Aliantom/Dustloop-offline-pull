@@ -1,4 +1,11 @@
 {
     "name": "Dustloop Mirror",
-    "postStartCommand": "bash .devcontainer/refresh.sh"
+    "postStartCommand": "bash .devcontainer/refresh.sh && nohup python3 dustloop_mirror/server.py > /tmp/dustloop-server.log 2>&1 &",
+    "forwardPorts": [8000],
+    "portsAttributes": {
+        "8000": {
+            "label": "Dustloop Mirror",
+            "onAutoForward": "openBrowser"
+        }
+    }
 }

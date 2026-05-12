@@ -17,6 +17,7 @@ Output:
 """
 
 import argparse
+import html
 import logging
 import shutil
 import subprocess
@@ -167,26 +168,27 @@ def create_index() -> None:
     if target is None:
         target = "site/w/Guilty_Gear_-Strive-.html"
 
-    html = f"""<!DOCTYPE html>
+    safe_target = html.escape(target, quote=True)
+    page = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <title>Dustloop Mirror</title>
-  <meta http-equiv="refresh" content="0; url={target}">
+  <meta http-equiv="refresh" content="0; url={safe_target}">
   <style>
     body {{ font-family: system-ui, sans-serif; max-width: 40rem; margin: 4rem auto; padding: 0 1rem; }}
   </style>
 </head>
 <body>
   <h1>Dustloop Offline Mirror</h1>
-  <p>Redirecting to the <a href="{target}">Guilty Gear -Strive- wiki</a>...</p>
+  <p>Redirecting to the <a href="{safe_target}">Guilty Gear -Strive- wiki</a>...</p>
   <p>If the redirect doesn't work, click the link above.</p>
   <hr>
   <p><small>Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</small></p>
 </body>
 </html>
 """
-    index_path.write_text(html, encoding="utf-8")
+    index_path.write_text(page, encoding="utf-8")
     logging.info("Wrote entry point: %s", index_path)
 
 
