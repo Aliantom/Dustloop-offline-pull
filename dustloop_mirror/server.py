@@ -7,6 +7,9 @@ from urllib.parse import urlparse, unquote
 LANDING_PAGE = '/w/Guilty_Gear_-Strive-'
 BASE_DIR = os.path.realpath(os.path.dirname(os.path.abspath(__file__)))
 
+# MIME types that indicate a failed guess (never valid for mirrored static files).
+_USELESS_MIMES = frozenset({'application/x-httpd-php', 'application/octet-stream'})
+
 
 class WikiRequestHandler(SimpleHTTPRequestHandler):
     def do_GET(self):
@@ -18,7 +21,15 @@ class WikiRequestHandler(SimpleHTTPRequestHandler):
         super().do_GET()
 
     def translate_path(self, path):
-        rel = unquote(urlparse(path).path).lstrip('/')
+        parsed = urlparse(path)
+        # MediaWiki's load.php and versioned asset URLs (fonts, icons) are saved
+        # by wget with the full query string as part of the filename on disk, e.g.:
+        #   load.php?lang=en&modules=skins.citizen.codex.styles&skin=citizen.css
+        #   RobotoFlex_latin.woff2?d34c0
+        # Build a "full" relative path that includes the query string.
+        full_url = parsed.path + ('?' + parsed.query if parsed.query else '')
+        full_rel = unquote(full_url).lstrip('/')
+        path_rel = unquote(parsed.path).lstrip('/')
         base = BASE_DIR
 
         def safe(p):
@@ -28,7 +39,18 @@ class WikiRequestHandler(SimpleHTTPRequestHandler):
                 return real
             return None
 
-        # Standard candidates
+        # 1. Try with the full URL (path+query) — this is the primary path for
+        #    all load.php CSS/JS bundles and versioned font/icon files.
+        if parsed.query:
+            for c in (full_rel, f"site/{full_rel}",
+                      f"{full_rel}.css", f"site/{full_rel}.css",
+                      f"{full_rel}.js", f"site/{full_rel}.js"):
+                full = safe(os.path.join(base, c))
+                if full and os.path.isfile(full):
+                    return full
+
+        # 2. Standard path-only candidates (HTML pages, images, etc.)
+        rel = path_rel
         for c in (rel, f"site/{rel}", f"{rel}.html", f"site/{rel}.html"):
             full = safe(os.path.join(base, c))
             if full is None:
@@ -38,8 +60,8 @@ class WikiRequestHandler(SimpleHTTPRequestHandler):
             if rel == '' and os.path.isdir(full):
                 return full
 
-        # Fallback: for missing /wiki/images/X/XY/file.png requests,
-        # look in /wiki/images/thumb/X/XY/file.png/ and return the largest thumb.
+        # 3. Fallback: for missing /wiki/images/X/XY/file.png requests,
+        #    look in /wiki/images/thumb/X/XY/file.png/ and return the largest thumb.
         if 'wiki/images/' in rel and '/thumb/' not in rel:
             parts = rel.split('/')
             try:
@@ -64,6 +86,35 @@ class WikiRequestHandler(SimpleHTTPRequestHandler):
 
         fallback = safe(os.path.join(base, rel))
         return fallback if fallback is not None else base
+
+    def guess_type(self, path):
+        # Normal guess works for .css, .html, .js, .png, etc.
+        mime, enc = super().guess_type(path)
+        if mime and mime not in _USELESS_MIMES:
+            return mime, enc
+
+        # Versioned files like RobotoFlex.woff2?d34c0 have the real extension
+        # before the '?'. Strip the query suffix and retry.
+        clean = path.partition('?')[0]
+        if clean != path:
+            mime, enc = super().guess_type(clean)
+            if mime and mime not in _USELESS_MIMES:
+                return mime, enc
+
+        # Last resort: sniff the first bytes for SVG. The Citizen skin serves
+        # its icons via load.php with no file extension, but the content is SVG.
+        try:
+            with open(path, 'rb') as f:
+                header = f.read(256)
+            snippet = header.lstrip()
+            if snippet.startswith(b'<svg') or (
+                snippet.startswith(b'<?xml') and b'<svg' in header
+            ):
+                return 'image/svg+xml', None
+        except OSError:
+            pass
+
+        return 'application/octet-stream', None
 
 
 port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
