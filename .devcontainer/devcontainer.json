@@ -1,0 +1,4 @@
+{
+    "name": "Dustloop Mirror",
+    "postStartCommand": "bash .devcontainer/refresh.sh"
+}
