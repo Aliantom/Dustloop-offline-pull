@@ -88,18 +88,18 @@ class WikiRequestHandler(SimpleHTTPRequestHandler):
         return fallback if fallback is not None else base
 
     def guess_type(self, path):
-        # Normal guess works for .css, .html, .js, .png, etc.
-        mime, enc = super().guess_type(path)
+        # super().guess_type() returns a plain string (not a tuple).
+        mime = super().guess_type(path)
         if mime and mime not in _USELESS_MIMES:
-            return mime, enc
+            return mime
 
         # Versioned files like RobotoFlex.woff2?d34c0 have the real extension
         # before the '?'. Strip the query suffix and retry.
         clean = path.partition('?')[0]
         if clean != path:
-            mime, enc = super().guess_type(clean)
+            mime = super().guess_type(clean)
             if mime and mime not in _USELESS_MIMES:
-                return mime, enc
+                return mime
 
         # Last resort: sniff the first bytes for SVG. The Citizen skin serves
         # its icons via load.php with no file extension, but the content is SVG.
@@ -110,11 +110,11 @@ class WikiRequestHandler(SimpleHTTPRequestHandler):
             if snippet.startswith(b'<svg') or (
                 snippet.startswith(b'<?xml') and b'<svg' in header
             ):
-                return 'image/svg+xml', None
+                return 'image/svg+xml'
         except OSError:
             pass
 
-        return 'application/octet-stream', None
+        return 'application/octet-stream'
 
 
 port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
