@@ -1,0 +1,13 @@
+# Mirror output - regenerated daily by the workflow, not stored in git
+# (server.py lives here too; keep it tracked as an exception)
+dustloop_mirror/*
+!dustloop_mirror/server.py
+
+# Old artifacts and logs at workspace root
+*.tar.gz
+*.log
+
+# OS / Python noise
+.DS_Store
+__pycache__/
+*.pyc
