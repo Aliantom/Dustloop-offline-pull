@@ -98,15 +98,21 @@ class H(SimpleHTTPRequestHandler):
             if rel == '' and os.path.isdir(full):
                 return full
 
-        # Fallback: missing /wiki/images/X/XY/file.png → largest thumbnail
-        if 'wiki/images/' in rel and '/thumb/' not in rel:
+        # Fallback: the exact rendition requested isn't on disk, but other
+        # sizes of the same image might be (wget only downloads the specific
+        # widths each crawled page actually referenced). Covers both a
+        # missing full-size image (.../images/X/XY/file.png) and a missing
+        # specific thumbnail width (.../images/thumb/X/XY/file.png/NNNpx-file.png)
+        # by serving the largest available rendition instead of a hard 404.
+        if 'wiki/images/' in rel:
             parts = rel.split('/')
             try:
                 idx = parts.index('images')
-                thumb_dir = os.path.join(
-                    base, 'site', 'wiki', 'images', 'thumb',
-                    *parts[idx+1:]
-                )
+                after = parts[idx+1:]
+                if after and after[0] == 'thumb':
+                    thumb_dir = os.path.join(base, 'site', 'wiki', 'images', *after[:-1])
+                else:
+                    thumb_dir = os.path.join(base, 'site', 'wiki', 'images', 'thumb', *after)
                 if os.path.isdir(thumb_dir):
                     def size_key(name):
                         try:
@@ -121,6 +127,7 @@ class H(SimpleHTTPRequestHandler):
 
         return os.path.join(base, rel)
 
-port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
-print(f"Serving Dustloop mirror on port {port}")
-ThreadingHTTPServer(('0.0.0.0', port), H).serve_forever()
+if __name__ == '__main__':
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
+    print(f"Serving Dustloop mirror on port {port}")
+    ThreadingHTTPServer(('0.0.0.0', port), H).serve_forever()
