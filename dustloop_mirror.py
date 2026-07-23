@@ -18,12 +18,17 @@ Output:
 
 import argparse
 import html
+import json
 import logging
 import shutil
 import subprocess
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime
 from pathlib import Path
+from typing import List, Optional
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -31,10 +36,17 @@ from pathlib import Path
 
 BASE_URL = "https://www.dustloop.com/w/Guilty_Gear_-Strive-"
 DOMAIN = "www.dustloop.com"
+API_URL = f"https://{DOMAIN}/w/api.php"
+
+# Title prefix used to find every GGST page via the wiki's API, so pages
+# that aren't well-linked from other pages still get discovered. Derived
+# from BASE_URL; adjust if Dustloop's page-naming convention changes.
+PAGE_TITLE_PREFIX = BASE_URL.rsplit("/w/", 1)[-1]
 
 OUTPUT_DIR = Path.home() / "dustloop_mirror"
 SITE_DIR = OUTPUT_DIR / "site"
 LOG_FILE = OUTPUT_DIR / "mirror.log"
+SEED_FILE = OUTPUT_DIR / "seed_urls.txt"
 
 # Politeness settings. Don't lower these — Dustloop is a community-run wiki.
 WAIT_BETWEEN_REQUESTS = 1   # seconds (with --random-wait this becomes 0.5–1.5s)
@@ -90,7 +102,71 @@ def check_wget() -> bool:
         return False
 
 
-def build_wget_command() -> list:
+def fetch_all_page_urls() -> List[str]:
+    """
+    Ask the wiki's API for every page whose title starts with the GGST
+    prefix. wget's own recursive crawl only finds pages it can reach by
+    following links from pages it has already visited, so anything not
+    well-linked (an orphan subpage, a page added since the last run) never
+    gets discovered no matter how many times the job reruns. Enumerating
+    pages via the API guarantees full, growing coverage instead.
+
+    Returns an empty list (never raises) if the API is unreachable — the
+    caller falls back to wget's plain recursive crawl in that case.
+    """
+    titles = set()
+    params = {
+        "action": "query",
+        "list": "allpages",
+        "apnamespace": "0",
+        "apprefix": PAGE_TITLE_PREFIX,
+        "aplimit": "500",
+        "format": "json",
+    }
+    apcontinue = None
+    while True:
+        if apcontinue:
+            params["apcontinue"] = apcontinue
+        url = f"{API_URL}?{urllib.parse.urlencode(params)}"
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.load(resp)
+        except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+            logging.warning(
+                "Page-list API call failed (%s); falling back to link crawl only.",
+                exc,
+            )
+            return []
+
+        for page in data.get("query", {}).get("allpages", []):
+            titles.add(page["title"])
+
+        apcontinue = data.get("continue", {}).get("apcontinue")
+        if not apcontinue:
+            break
+
+    safe_chars = "/:,()&'"
+    urls = [
+        f"https://{DOMAIN}/w/{urllib.parse.quote(t.replace(' ', '_'), safe=safe_chars)}"
+        for t in sorted(titles)
+    ]
+    logging.info(
+        "Discovered %d pages via wiki API under title prefix %r",
+        len(urls), PAGE_TITLE_PREFIX,
+    )
+    return urls
+
+
+def write_seed_file(urls: List[str]) -> Optional[Path]:
+    """Write discovered page URLs to a file wget can consume with --input-file."""
+    if not urls:
+        return None
+    SEED_FILE.write_text("\n".join(urls) + "\n", encoding="utf-8")
+    return SEED_FILE
+
+
+def build_wget_command(seed_file: Optional[Path] = None) -> list:
     """
     Construct the wget invocation.
 
@@ -98,7 +174,7 @@ def build_wget_command() -> list:
     MediaWiki's URL layout and may have been blocking pages we wanted.
     Scope is now controlled exclusively by --domains and --include-directories.
     """
-    return [
+    cmd = [
         "wget",
         "--mirror",                              # recursive + timestamping + infinite depth
         "--convert-links",                       # rewrite links to work offline
@@ -117,19 +193,30 @@ def build_wget_command() -> list:
         "--tries=3",                             # retry transient failures
         "--timeout=30",
         "--no-verbose",                          # one log line per file, not five
-        BASE_URL,
     ]
+    if seed_file:
+        # Seed the full known page list *in addition to* the recursive crawl
+        # from BASE_URL below, so every page gets visited regardless of
+        # whether anything currently links to it.
+        cmd.append(f"--input-file={seed_file}")
+    cmd.append(BASE_URL)
+    return cmd
 
 
 def mirror_site(dry_run: bool = False) -> bool:
-    cmd = build_wget_command()
+    SITE_DIR.mkdir(parents=True, exist_ok=True)
+
+    seed_file = None
+    if not dry_run:
+        seed_file = write_seed_file(fetch_all_page_urls())
+
+    cmd = build_wget_command(seed_file)
     logging.info("Command: %s", " ".join(cmd))
 
     if dry_run:
         logging.info("--dry-run set; not executing wget.")
         return True
 
-    SITE_DIR.mkdir(parents=True, exist_ok=True)
     started = datetime.now()
     try:
         result = subprocess.run(cmd)
