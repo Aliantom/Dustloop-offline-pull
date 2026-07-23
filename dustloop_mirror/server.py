@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Serves the dustloop mirror, translating wiki URLs to local file paths."""
-import os, sys
+import os, re, sys
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse, unquote
 
@@ -124,6 +124,37 @@ class H(SimpleHTTPRequestHandler):
                         return os.path.join(thumb_dir, max(cands, key=size_key))
             except (ValueError, OSError):
                 pass
+
+        # Fallback: ResourceLoader combined-module bundles (load.php) are
+        # named after their exact query string, but different pages request
+        # slightly different module combinations (protection status,
+        # galleries, tabbers, etc.), so wget only ever caches the literal
+        # combinations it happened to see -- most pages reference a bundle
+        # that was never saved under that exact name. Some very long
+        # combinations also get their on-disk filename truncated by
+        # filesystem name-length limits, orphaning otherwise-valid files.
+        # Serve the closest-matching bundle actually on disk (by module
+        # overlap) instead of leaving the page completely unstyled.
+        if rel == 'wiki/load.php' and 'only=styles' in query:
+            wiki_dir = os.path.join(base, 'site', 'wiki')
+            mod_match = re.search(r'modules=([^&]*)', query)
+            requested = set(mod_match.group(1).split('|')) if mod_match else set()
+            skin_match = re.search(r'skin=([^&]+)', query)
+            skin = skin_match.group(1) if skin_match else None
+            best, best_score = None, 0
+            if os.path.isdir(wiki_dir):
+                for name in os.listdir(wiki_dir):
+                    if not (name.startswith('load.php?') and name.endswith('.css')):
+                        continue
+                    m = re.search(r'modules=([^&]*)', name)
+                    modules = set(m.group(1).split('|')) if m else set()
+                    score = len(requested & modules)
+                    if skin and f'skin={skin}' in name:
+                        score += 0.5
+                    if score > best_score:
+                        best, best_score = name, score
+            if best:
+                return os.path.join(wiki_dir, best)
 
         return os.path.join(base, rel)
 
