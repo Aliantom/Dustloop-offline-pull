@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Serves the dustloop mirror, translating wiki URLs to local file paths."""
-import os, sys
+import os, re, sys
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse, unquote
 
@@ -98,15 +98,21 @@ class H(SimpleHTTPRequestHandler):
             if rel == '' and os.path.isdir(full):
                 return full
 
-        # Fallback: missing /wiki/images/X/XY/file.png → largest thumbnail
-        if 'wiki/images/' in rel and '/thumb/' not in rel:
+        # Fallback: the exact rendition requested isn't on disk, but other
+        # sizes of the same image might be (wget only downloads the specific
+        # widths each crawled page actually referenced). Covers both a
+        # missing full-size image (.../images/X/XY/file.png) and a missing
+        # specific thumbnail width (.../images/thumb/X/XY/file.png/NNNpx-file.png)
+        # by serving the largest available rendition instead of a hard 404.
+        if 'wiki/images/' in rel:
             parts = rel.split('/')
             try:
                 idx = parts.index('images')
-                thumb_dir = os.path.join(
-                    base, 'site', 'wiki', 'images', 'thumb',
-                    *parts[idx+1:]
-                )
+                after = parts[idx+1:]
+                if after and after[0] == 'thumb':
+                    thumb_dir = os.path.join(base, 'site', 'wiki', 'images', *after[:-1])
+                else:
+                    thumb_dir = os.path.join(base, 'site', 'wiki', 'images', 'thumb', *after)
                 if os.path.isdir(thumb_dir):
                     def size_key(name):
                         try:
@@ -119,8 +125,40 @@ class H(SimpleHTTPRequestHandler):
             except (ValueError, OSError):
                 pass
 
+        # Fallback: ResourceLoader combined-module bundles (load.php) are
+        # named after their exact query string, but different pages request
+        # slightly different module combinations (protection status,
+        # galleries, tabbers, etc.), so wget only ever caches the literal
+        # combinations it happened to see -- most pages reference a bundle
+        # that was never saved under that exact name. Some very long
+        # combinations also get their on-disk filename truncated by
+        # filesystem name-length limits, orphaning otherwise-valid files.
+        # Serve the closest-matching bundle actually on disk (by module
+        # overlap) instead of leaving the page completely unstyled.
+        if rel == 'wiki/load.php' and 'only=styles' in query:
+            wiki_dir = os.path.join(base, 'site', 'wiki')
+            mod_match = re.search(r'modules=([^&]*)', query)
+            requested = set(mod_match.group(1).split('|')) if mod_match else set()
+            skin_match = re.search(r'skin=([^&]+)', query)
+            skin = skin_match.group(1) if skin_match else None
+            best, best_score = None, 0
+            if os.path.isdir(wiki_dir):
+                for name in os.listdir(wiki_dir):
+                    if not (name.startswith('load.php?') and name.endswith('.css')):
+                        continue
+                    m = re.search(r'modules=([^&]*)', name)
+                    modules = set(m.group(1).split('|')) if m else set()
+                    score = len(requested & modules)
+                    if skin and f'skin={skin}' in name:
+                        score += 0.5
+                    if score > best_score:
+                        best, best_score = name, score
+            if best:
+                return os.path.join(wiki_dir, best)
+
         return os.path.join(base, rel)
 
-port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
-print(f"Serving Dustloop mirror on port {port}")
-ThreadingHTTPServer(('0.0.0.0', port), H).serve_forever()
+if __name__ == '__main__':
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
+    print(f"Serving Dustloop mirror on port {port}")
+    ThreadingHTTPServer(('0.0.0.0', port), H).serve_forever()

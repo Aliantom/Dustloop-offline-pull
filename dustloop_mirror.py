@@ -36,12 +36,15 @@ from typing import List, Optional
 
 BASE_URL = "https://www.dustloop.com/w/Guilty_Gear_-Strive-"
 DOMAIN = "www.dustloop.com"
-API_URL = f"https://{DOMAIN}/w/api.php"
+API_URL = f"https://{DOMAIN}/wiki/api.php"
 
 # Title prefix used to find every GGST page via the wiki's API, so pages
-# that aren't well-linked from other pages still get discovered. Derived
-# from BASE_URL; adjust if Dustloop's page-naming convention changes.
-PAGE_TITLE_PREFIX = BASE_URL.rsplit("/w/", 1)[-1]
+# that aren't well-linked from other pages still get discovered. Character
+# and system subpages live under "GGST/..." (e.g. "GGST/Sol_Badguy"), which
+# is a different title than the BASE_URL landing page ("Guilty_Gear_-Strive-"),
+# so this is intentionally not derived from BASE_URL. Confirmed against a
+# live crawl log — adjust if Dustloop's naming convention changes again.
+PAGE_TITLE_PREFIX = "GGST"
 
 OUTPUT_DIR = Path.home() / "dustloop_mirror"
 SITE_DIR = OUTPUT_DIR / "site"
