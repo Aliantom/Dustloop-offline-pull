@@ -48,6 +48,30 @@ Subsequent runs are **much faster** (usually a few minutes) because wget's `--ti
 
 ---
 
+## How daily runs keep discovering new pages
+
+`wget`'s recursive crawl only finds pages it can reach by following links from
+pages it has already downloaded. If a page isn't well-linked from elsewhere on
+the wiki, pure link-following will never find it — no matter how many times
+the job reruns, since each run just rediscovers the same link graph. That
+used to mean the mirror could run forever and keep existing pages fresh
+without ever growing to cover new sections.
+
+To fix this, every run now also asks the wiki's own API
+(`action=query&list=allpages`) for the complete, current list of GGST page
+titles and feeds that list to `wget` as explicit seed URLs, in addition to
+the normal recursive crawl. `--timestamping` still applies per page, so
+pages already on disk and unchanged stay cheap (a quick conditional check);
+only pages missing locally — new pages, or ones a previous run never reached
+— get fully downloaded. As Dustloop's wiki grows, tomorrow's run picks up
+whatever's new automatically.
+
+If the wiki's API is unreachable when a run starts (e.g. no network), the
+script logs a warning and falls back to the plain recursive crawl from
+`BASE_URL`, same as before — it never fails the whole run over this.
+
+---
+
 ## Scheduling daily updates
 
 Pick the section for your OS.
