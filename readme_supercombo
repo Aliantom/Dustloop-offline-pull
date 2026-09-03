@@ -1,0 +1,95 @@
+# Supercombo Wiki — Avatar Legends Offline Mirror
+
+A small Python script that mirrors the **Avatar Legends** section of [wiki.supercombo.gg](https://wiki.supercombo.gg/w/Avatar_Legends) for offline reading. Runs on a schedule (e.g. daily) and only re-downloads pages that have changed. Pages whose title contains "Zaheer" are seeded first, so a fresh or interrupted run captures that character before anything else.
+
+The output is plain HTML with all images/CSS/JS, viewable in any browser — no server needed. Just open `~/supercombo_mirror/index.html`.
+
+This mirror follows the exact same design as the Dustloop GGST mirror in this repo (see `readme` / `dustloop_mirror.py`); see that document for the full rationale. This file only covers what's different for Supercombo.
+
+---
+
+## Requirements
+
+- **Python 3.8+**
+- **wget**
+
+Verify it works: `wget --version`
+
+---
+
+## First run
+
+```bash
+python supercombo_mirror.py
+```
+
+When it's done you'll have:
+
+```
+~/supercombo_mirror/
+├── index.html        ← open this (redirects to Avatar Legends, links straight to Zaheer if present)
+├── mirror.log         ← run history
+└── site/
+    ├── w/             ← wiki pages
+    ├── images/        ← character art, hitboxes, etc.
+    └── ...
+```
+
+Subsequent runs are much faster because wget's `--timestamping` flag skips files that haven't changed on the server.
+
+---
+
+## Why this session can't scrape it directly
+
+This mirror is downloaded by the `Mirror Supercombo Avatar Legends Wiki` GitHub Actions workflow (`.github/workflows/supercombo-mirror.yml`), the same way the Dustloop mirror is — **not** by Claude's session itself. The sandbox this session runs in has outbound network access restricted to a small allowlist (GitHub, package registries, the Anthropic API); `wiki.supercombo.gg` isn't reachable from here. GitHub's own Actions runners have full internet access, so that's where the actual wget crawl happens.
+
+To get a mirror:
+
+1. Merge this branch (or push the workflow file to `main` some other way) so GitHub registers the workflow.
+2. Trigger it manually: repo → **Actions** tab → **Mirror Supercombo Avatar Legends Wiki** → **Run workflow**. (`workflow_dispatch` only works once the workflow file exists on the default branch — that's a GitHub platform restriction, not something this script controls.)
+3. Once it finishes, download the `supercombo-avatar-legends-mirror` artifact from the run's summary page and unpack `supercombo_mirror.tar.gz`.
+4. After that, it also runs automatically every day at 07:15 UTC.
+
+---
+
+## How the page-discovery + Zaheer priority works
+
+Same mechanism as the Dustloop mirror: `wget`'s recursive crawl only finds pages reachable by following links from pages it's already downloaded, so an orphaned subpage could be missed forever. Every run instead asks the wiki's own API (`action=query&list=allpages` with `apprefix=Avatar_Legends`) for the complete, current list of Avatar Legends page titles, and feeds that list to `wget` as explicit seed URLs in addition to the normal recursive crawl.
+
+That seed list is sorted so any title containing "zaheer" (case-insensitive) comes first. `--timestamping` means pages already on disk and unchanged are a cheap conditional check, so re-running never wastes time re-fetching Zaheer once it's captured — but on the very first run, or after cache eviction, Zaheer's pages are the first thing downloaded, not the last.
+
+If the wiki's API is unreachable when a run starts, the script logs a warning and falls back to the plain recursive crawl from `BASE_URL` — it never fails the whole run over this, it just loses the priority ordering and orphan-page guarantee for that run.
+
+---
+
+## Serving it locally
+
+`supercombo_mirror/server.py` works the same way as the Dustloop one — it translates wiki-style URLs (including query strings and thumbnail fallbacks) to the files wget actually saved, and patches in a CSS fix for MediaWiki's Tabber extension so movelist tabs don't collapse to a single hidden panel:
+
+```bash
+cd ~/supercombo_mirror
+python /path/to/repo/supercombo_mirror/server.py 8001
+```
+
+Then open `http://localhost:8001/`.
+
+---
+
+## Customization
+
+All settings are at the top of `supercombo_mirror.py`:
+
+| Setting | Default | What it does |
+|---|---|---|
+| `BASE_URL` | `.../w/Avatar_Legends` | Change to mirror a different Supercombo game section |
+| `PRIORITY_SUBSTRING` | `"zaheer"` | Case-insensitive title substring downloaded first |
+| `OUTPUT_DIR` | `~/supercombo_mirror` | Where files go |
+| `WAIT_BETWEEN_REQUESTS` | `1` | Seconds between requests. **Don't lower this.** |
+| `INCLUDE_DIRS` | wiki + assets | Paths wget is allowed to descend into |
+| `REJECT_REGEX` | edit/history/etc. | URL patterns to skip (saves a lot of space) |
+
+---
+
+## A note on etiquette
+
+Supercombo is a community wiki, same spirit as Dustloop: this script is for **personal offline use**, please don't redistribute the mirror or run it more than once a day. The 1-second wait between requests keeps load on their servers minimal.
