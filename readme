@@ -4,6 +4,8 @@ A small Python script that mirrors the **Guilty Gear -Strive-** section of [dust
 
 The output is plain HTML with all images/CSS/JS, viewable in any browser — no server needed. Just open `~/dustloop_mirror/index.html`.
 
+There's also a mirror of the Supercombo wiki's Avatar Legends section, built the same way — see `readme_supercombo` and `supercombo_mirror.py`.
+
 ---
 
 ## Requirements
