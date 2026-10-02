@@ -138,6 +138,7 @@ def load_state() -> dict:
     state.setdefault("pages", {})    # title -> {"revid": int, "fetched": iso}
     state.setdefault("missing", {})  # url -> iso of last 404
     state.setdefault("css", {})      # load.php query -> iso fetched
+    state.setdefault("gone", {})     # local asset path -> iso of last 404
     return state
 
 
@@ -235,6 +236,7 @@ NOSCRIPT_RE = re.compile(r"</?noscript\b[^>]*>", re.I)
 SRCSET_RE = re.compile(r"\s(?:data-)?srcset\s*=\s*(\"[^\"]*\"|'[^']*')", re.I)
 LINK_TAG_RE = re.compile(r"<link\b[^>]*>", re.I)
 IMG_TAG_RE = re.compile(r"<img\b[^>]*>", re.I)
+MEDIA_TAG_RE = re.compile(r"<(?:video|source|audio|track)\b[^>]*>", re.I)
 ATTR_RE = re.compile(r"(\s(src|href|data-src|poster)\s*=\s*)(\"[^\"]*\"|'[^']*')", re.I)
 CSS_URL_RE = re.compile(r"url\(\s*(['\"]?)([^'\")]+)\1\s*\)", re.I)
 CSS_IMPORT_RE = re.compile(r"@import\s+(['\"])([^'\"]+)\1", re.I)
@@ -291,6 +293,7 @@ class Mirror:
         if status != 200:
             if status in (404, 410):
                 self.state["missing"][url] = now().isoformat()
+                self.state["gone"][asset_local_path(site_path)] = now().isoformat()
             self.stats["failed"] += 1
             logging.info("  %s -> %s", site_path, status)
             return False
@@ -408,6 +411,8 @@ class Mirror:
 
         page = LINK_TAG_RE.sub(fix_link_tag, page)
         page = IMG_TAG_RE.sub(fix_img_tag, page)
+        # <video>/<source> files hosted on Dustloop: download them too.
+        page = MEDIA_TAG_RE.sub(fix_img_tag, page)
 
         # Inline styles and <style> blocks: url(...) references.
         page = CSS_URL_RE.sub(
@@ -458,12 +463,73 @@ class Mirror:
 # Run
 # ---------------------------------------------------------------------------
 
-def plan(state: dict, discovered: Dict[str, Optional[int]], refetch_all: bool) -> List[str]:
-    """Order: priority pages, then pages never downloaded, then changed pages."""
-    known = set(discovered) | set(state["pages"]) | set(PRIORITY_TITLES)
+AUDIT_REF_RE = re.compile(r"\s(?:src|poster)\s*=\s*\"([^\"]+)\"", re.I)
+AUDIT_CSS_RE = re.compile(r"<link\b[^>]*stylesheet[^>]*href=\"([^\"]+)\"", re.I)
+IFRAME_RE = re.compile(r"<iframe\b[^>]*>", re.I)
+VIDEO_TAG_RE = re.compile(r"<video\b", re.I)
+EMBED_HOST_RE = re.compile(r"(?:data-)?src=\"(?:https?:)?//([^/\"]+)", re.I)
+
+
+def page_titles_on_disk() -> List[str]:
+    w = SITE_DIR / "w"
+    titles = []
+    for f in list((w / "GGST").rglob("*.html")) + list(w.glob("Guilty_Gear_-Strive-*.html")):
+        titles.append(f.relative_to(w).as_posix()[:-5].replace("_", " "))
+    return sorted(titles)
+
+
+def audit(state: dict) -> dict:
+    """
+    Check every GGST page on disk for things that would make it render
+    badly: still in the old (wget) format, or referencing a stylesheet,
+    image, font or video that isn't on disk. Files the wiki itself says
+    don't exist (404) are not counted against a page.
+    """
+    css_cache: Dict[str, List[str]] = {}
+    result = {"pages": 0, "good": 0, "old": [], "broken": {}, "missing_files": 0,
+              "embeds": {}, "video_tags": 0}
+
+    def exists(ref: str) -> bool:
+        local = urllib.parse.unquote(html.unescape(ref)).split("?", 1)[0]
+        return local in state["gone"] or (SITE_DIR / local.lstrip("/")).exists()
+
+    for title in page_titles_on_disk():
+        result["pages"] += 1
+        text = title_to_path(title).read_text(encoding="utf-8", errors="replace")
+        if "/wiki/load.php?" in text or "<script" in text or title not in state["pages"]:
+            result["old"].append(title)
+            continue
+        refs = [r for r in AUDIT_REF_RE.findall(text) if r.startswith("/") and not r.startswith("/w/")]
+        for css in AUDIT_CSS_RE.findall(text):
+            refs.append(css)
+            if css not in css_cache:
+                f = SITE_DIR / css.lstrip("/")
+                body = f.read_text(encoding="utf-8", errors="replace") if f.exists() else ""
+                css_cache[css] = [u for _, u in CSS_URL_RE.findall(body) if u.startswith("/")]
+            refs += css_cache[css]
+        refs += [u for _, u in CSS_URL_RE.findall(text) if u.startswith("/")]
+        missing = sorted({r for r in refs if not exists(r)})
+        if missing:
+            result["broken"][title] = missing
+            result["missing_files"] += len(missing)
+        else:
+            result["good"] += 1
+        for tag in IFRAME_RE.findall(text):
+            for host in EMBED_HOST_RE.findall(tag):
+                result["embeds"][host] = result["embeds"].get(host, 0) + 1
+        result["video_tags"] += len(VIDEO_TAG_RE.findall(text))
+    return result
+
+
+def plan(state: dict, discovered: Dict[str, Optional[int]], refetch_all: bool,
+         broken: Optional[Set[str]] = None) -> List[str]:
+    """Order: priority pages, then pages never downloaded, then pages still in
+    the old format or with missing files, then changed pages."""
+    broken = broken or set()
+    known = set(discovered) | set(state["pages"]) | set(PRIORITY_TITLES) | set(page_titles_on_disk())
 
     def needs_fetch(title: str) -> bool:
-        if refetch_all or not title_to_path(title).exists():
+        if refetch_all or not title_to_path(title).exists() or title in broken:
             return True
         saved = state["pages"].get(title)
         if not saved:
@@ -474,21 +540,28 @@ def plan(state: dict, discovered: Dict[str, Optional[int]], refetch_all: bool) -
     todo = [t for t in PRIORITY_TITLES if needs_fetch(t)]
     rest = sorted(t for t in known if t not in PRIORITY_TITLES and needs_fetch(t))
     missing_first = [t for t in rest if not title_to_path(t).exists()]
-    changed = [t for t in rest if title_to_path(t).exists()]
-    return todo + missing_first + changed
+    repair = [t for t in rest if title_to_path(t).exists() and
+              (t in broken or t not in state["pages"])]
+    changed = [t for t in rest if t not in missing_first and t not in repair]
+    return todo + missing_first + repair + changed
 
 
 def write_status(state: dict, discovered: Dict[str, Optional[int]],
                  remaining: List[str], stats: dict, started: datetime,
-                 fetcher: Fetcher, failed_pages: List[str]) -> None:
-    total = len(set(discovered) | set(state["pages"]))
-    have = sum(1 for t in set(discovered) | set(state["pages"]) if title_to_path(t).exists())
+                 fetcher: Fetcher, failed_pages: List[str], check: dict) -> None:
+    total = len(set(discovered) | set(page_titles_on_disk()))
+    embeds = ", ".join(f"{h} x{n}" for h, n in sorted(check["embeds"].items(), key=lambda x: -x[1])[:6])
     lines = [
         "# Dustloop GGST mirror status",
         "",
         f"- Run finished: {now().strftime('%Y-%m-%d %H:%M UTC')} "
         f"(took {str(now() - started).split('.')[0]}, {fetcher.requests} requests)",
-        f"- Pages on disk: **{have} / {total}**",
+        f"- Pages fully rendered (new format, every file present): "
+        f"**{check['good']} / {total}**",
+        f"- Still in the old unstyled format: {len(check['old'])}",
+        f"- Pages with missing files: {len(check['broken'])} ({check['missing_files']} files)"
+        + (" (re-queued)" if check["broken"] else ""),
+        f"- Videos: {check['video_tags']} <video> tags; embeds: {embeds or 'none'}",
         f"- This run: {stats['pages']} pages, {stats['assets']} images/fonts, "
         f"{stats['css']} stylesheets, {stats['failed']} failed requests",
         f"- Still to do: {len(remaining)} pages"
@@ -496,6 +569,9 @@ def write_status(state: dict, discovered: Dict[str, Optional[int]],
     ]
     if failed_pages:
         lines += ["", f"Pages that failed ({len(failed_pages)}):", ""] + [f"- {t}" for t in failed_pages[:15]]
+    if check["broken"]:
+        lines += ["", "Pages with missing files:", ""] + [
+            f"- {t}: {', '.join(m[:3])}" for t, m in list(check["broken"].items())[:10]]
     if remaining:
         lines += ["", "Next up:", ""] + [f"- {t}" for t in remaining[:15]]
     text = "\n".join(lines) + "\n"
@@ -579,7 +655,9 @@ def main() -> int:
         queue = list(args.only)
     else:
         discovered = discover_pages(fetcher)
-        queue = plan(state, discovered, args.refetch_all)
+        before = audit(state)
+        broken = set(before["broken"])
+        queue = plan(state, discovered, args.refetch_all, broken)
     logging.info("%d pages to fetch this run", len(queue))
 
     seen = set(queue)
@@ -606,7 +684,7 @@ def main() -> int:
     save_state(state)
     create_index()
     write_status(state, discovered, queue[i:], mirror.stats, started, fetcher,
-                 mirror.failed_pages)
+                 mirror.failed_pages, audit(state))
     return 0
 
 

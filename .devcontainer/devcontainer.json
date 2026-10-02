@@ -1,6 +1,6 @@
 {
     "name": "Dustloop Mirror",
-    "postStartCommand": "bash .devcontainer/refresh.sh && (cd dustloop_mirror && nohup python3 server.py > /tmp/dustloop-server.log 2>&1 &)",
+    "postStartCommand": "bash .devcontainer/refresh.sh; (cd dustloop_mirror && nohup python3 server.py > /tmp/dustloop-server.log 2>&1 &)",
     "forwardPorts": [8000],
     "portsAttributes": {
         "8000": {
