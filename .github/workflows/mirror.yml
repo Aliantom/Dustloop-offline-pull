@@ -28,7 +28,9 @@ permissions:
 
 concurrency:
   group: dustloop-mirror
-  cancel-in-progress: false
+  # A newer run replaces one in progress; progress is saved either way
+  # (the cache save step runs even on cancel).
+  cancel-in-progress: true
 
 jobs:
   mirror:
@@ -78,7 +80,7 @@ jobs:
       - name: Run the mirror script
         id: mirror
         env:
-          BUDGET: ${{ github.event_name == 'push' && '20' || github.event_name == 'schedule' && '290' || inputs.budget_minutes || '60' }}
+          BUDGET: ${{ github.event_name == 'push' && '5' || github.event_name == 'schedule' && '290' || inputs.budget_minutes || '60' }}
         run: |
           set +e
           timeout 18000 python dustloop_mirror.py --budget-minutes "$BUDGET"
