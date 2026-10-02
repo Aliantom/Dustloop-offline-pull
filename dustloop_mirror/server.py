@@ -44,6 +44,51 @@ TAB_FIX_CSS = b"""<style>
 </style>
 """
 
+def _expand_modules(spec):
+    """Expand MediaWiki's packed module list: 'a.b,c|d' -> {'a.b','a.c','d'}."""
+    out = set()
+    for group in spec.split('|'):
+        parts = group.split(',')
+        head = parts[0]
+        out.add(head)
+        prefix = head.rsplit('.', 1)[0] + '.' if '.' in head else ''
+        for p in parts[1:]:
+            out.add(prefix + p)
+    return {m for m in out if m}
+
+
+def _modules_from(query):
+    """Pull the module set out of a load.php query (tolerates truncated names)."""
+    if 'modules=' not in query:
+        return set()
+    spec = query.split('modules=', 1)[1].split('&', 1)[0]
+    return _expand_modules(spec)
+
+
+def closest_load_php(base, rel, query):
+    """wget truncates long load.php filenames and pages ask for module combos
+    that were never saved. Pick the saved stylesheet that covers the most of
+    the requested modules instead of 404ing."""
+    if not rel.endswith('load.php') or 'only=styles' not in query:
+        return None
+    wanted = _modules_from(query)
+    if not wanted:
+        return None
+    best, best_score = None, (0, 0)
+    for d in (os.path.join(base, 'site', os.path.dirname(rel)),
+              os.path.join(base, os.path.dirname(rel))):
+        if not os.path.isdir(d):
+            continue
+        for name in os.listdir(d):
+            if not name.startswith('load.php?') or 'only=scripts' in name:
+                continue
+            have = _modules_from(name[len('load.php?'):])
+            score = (len(wanted & have), -len(have - wanted))
+            if score > best_score:
+                best, best_score = os.path.join(d, name), score
+    return best
+
+
 class H(SimpleHTTPRequestHandler):
     def do_GET(self):
         if self.path in ('/', ''):
@@ -97,6 +142,12 @@ class H(SimpleHTTPRequestHandler):
                 return full
             if rel == '' and os.path.isdir(full):
                 return full
+
+        # Fallback: no exact load.php match -> closest stylesheet bundle
+        if query:
+            match = closest_load_php(base, rel, query)
+            if match:
+                return match
 
         # Fallback: missing /wiki/images/X/XY/file.png → largest thumbnail
         if 'wiki/images/' in rel and '/thumb/' not in rel:
