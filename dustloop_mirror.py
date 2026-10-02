@@ -82,6 +82,16 @@ USER_AGENT = "DustloopOfflineMirror/2.0 (personal offline reader)"
 
 # Stylesheets change occasionally; images effectively never do.
 CSS_MAX_AGE = timedelta(days=7)
+# YouTube combo videos (Combos pages only), downloaded with yt-dlp after all
+# pages are done. 360p keeps the whole set small; raise it if you want.
+YOUTUBE_MAX_HEIGHT = int(os.environ.get("DUSTLOOP_YT_HEIGHT", "360"))
+YOUTUBE_DIR_NAME = "_media/yt"
+YOUTUBE_RETRY_AFTER = timedelta(days=2)
+# Matches embeds, links and thumbnails; keep in sync with server.py.
+YOUTUBE_ID_RE = re.compile(
+    r"(?:youtube(?:-nocookie)?\.com/(?:embed/|watch\?v=|shorts/|v/)|youtu\.be/|ytimg\.com/vi/)"
+    r"([A-Za-z0-9_-]{11})")
+
 # Don't keep re-requesting URLs that 404'd for this long.
 MISSING_RETRY_AFTER = timedelta(days=7)
 
@@ -138,6 +148,7 @@ def load_state() -> dict:
     state.setdefault("pages", {})    # title -> {"revid": int, "fetched": iso}
     state.setdefault("missing", {})  # url -> iso of last 404
     state.setdefault("css", {})      # load.php query -> iso fetched
+    state.setdefault("yt_failed", {})  # youtube id -> {"when": iso, "why": str}
     state.setdefault("gone", {})     # local asset path -> iso of last 404
     return state
 
@@ -546,9 +557,92 @@ def plan(state: dict, discovered: Dict[str, Optional[int]], refetch_all: bool,
     return todo + missing_first + repair + changed
 
 
+def combos_youtube_ids() -> Dict[str, List[str]]:
+    """{video id: [Combos pages it appears on]} for every GGST Combos page."""
+    ids: Dict[str, List[str]] = {}
+    for title in page_titles_on_disk():
+        if not title.endswith("/Combos"):
+            continue
+        text = title_to_path(title).read_text(encoding="utf-8", errors="replace")
+        for vid in dict.fromkeys(YOUTUBE_ID_RE.findall(text)):
+            ids.setdefault(vid, []).append(title)
+    return ids
+
+
+def youtube_file(vid: str) -> Path:
+    return SITE_DIR / YOUTUBE_DIR_NAME / f"{vid}.mp4"
+
+
+def download_youtube(state: dict, deadline: Optional[datetime]) -> dict:
+    """Download combo videos with yt-dlp until done or out of time."""
+    import shutil
+    import subprocess
+    ids = combos_youtube_ids()
+    result = {"total": len(ids), "downloaded": 0, "failed_now": 0,
+              "remaining": 0, "skipped": None}
+    todo = []
+    for vid in ids:
+        if youtube_file(vid).exists():
+            continue
+        failed = state["yt_failed"].get(vid)
+        if failed and now() - datetime.fromisoformat(failed["when"]) < YOUTUBE_RETRY_AFTER:
+            continue
+        todo.append(vid)
+    result["remaining"] = len(todo)
+    if not todo:
+        return result
+    ytdlp = shutil.which("yt-dlp")
+    if not ytdlp:
+        result["skipped"] = "yt-dlp not installed"
+        logging.warning("yt-dlp not installed; skipping %d combo videos", len(todo))
+        return result
+
+    (SITE_DIR / YOUTUBE_DIR_NAME).mkdir(parents=True, exist_ok=True)
+    h = YOUTUBE_MAX_HEIGHT
+    fmt = (f"b[ext=mp4][height<={h}]/bv*[ext=mp4][height<={h}]+ba[ext=m4a]/"
+           f"b[height<={h}]/bv*[height<={h}]+ba/b")
+    streak = 0
+    for n, vid in enumerate(todo):
+        if deadline and now() > deadline:
+            logging.info("Time budget reached during videos; continuing next run.")
+            break
+        out = youtube_file(vid)
+        cmd = [ytdlp, "-q", "--no-warnings", "--no-playlist", "-f", fmt,
+               "--merge-output-format", "mp4", "--max-filesize", "80M",
+               "--sleep-requests", "1", "-o", str(out.with_suffix(".%(ext)s")),
+               f"https://www.youtube.com/watch?v={vid}"]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            ok = proc.returncode == 0 and out.exists()
+            why = (proc.stderr.strip().splitlines() or ["unknown error"])[-1][:200]
+        except subprocess.TimeoutExpired:
+            ok, why = False, "timed out"
+        if ok:
+            result["downloaded"] += 1
+            state["yt_failed"].pop(vid, None)
+            streak = 0
+            logging.info("Video %s saved (%s)", vid, ids[vid][0])
+        else:
+            result["failed_now"] += 1
+            state["yt_failed"][vid] = {"when": now().isoformat(), "why": why}
+            streak += 1
+            logging.warning("Video %s failed: %s", vid, why)
+            if streak >= 8:
+                logging.warning("8 videos failed in a row (YouTube may be blocking "
+                                "this machine); stopping videos for this run.")
+                save_state(state)
+                break
+        save_state(state)
+        time.sleep(2)
+    result["remaining"] = sum(1 for v in ids if not youtube_file(v).exists()
+                              and v not in state["yt_failed"])
+    return result
+
+
 def write_status(state: dict, discovered: Dict[str, Optional[int]],
                  remaining: List[str], stats: dict, started: datetime,
-                 fetcher: Fetcher, failed_pages: List[str], check: dict) -> None:
+                 fetcher: Fetcher, failed_pages: List[str], check: dict,
+                 videos: Optional[dict] = None) -> None:
     total = len(set(discovered) | set(page_titles_on_disk()))
     embeds = ", ".join(f"{h} x{n}" for h, n in sorted(check["embeds"].items(), key=lambda x: -x[1])[:6])
     lines = [
@@ -562,6 +656,11 @@ def write_status(state: dict, discovered: Dict[str, Optional[int]],
         f"- Pages with missing files: {len(check['broken'])} ({check['missing_files']} files)"
         + (" (re-queued)" if check["broken"] else ""),
         f"- Videos: {check['video_tags']} <video> tags; embeds: {embeds or 'none'}",
+        *([f"- Combo videos (YouTube, Combos pages): "
+           f"**{sum(1 for v in combos_youtube_ids() if youtube_file(v).exists())} / {videos['total']}** "
+           f"downloaded; this run +{videos['downloaded']}, {videos['failed_now']} failed"
+           + (f" ({videos['skipped']})" if videos.get('skipped') else "")]
+          if videos else []),
         f"- This run: {stats['pages']} pages, {stats['assets']} images/fonts, "
         f"{stats['css']} stylesheets, {stats['failed']} failed requests",
         f"- Still to do: {len(remaining)} pages"
@@ -569,6 +668,13 @@ def write_status(state: dict, discovered: Dict[str, Optional[int]],
     ]
     if failed_pages:
         lines += ["", f"Pages that failed ({len(failed_pages)}):", ""] + [f"- {t}" for t in failed_pages[:15]]
+    yt_fail = state.get("yt_failed", {})
+    if videos and yt_fail:
+        reasons: Dict[str, int] = {}
+        for f in yt_fail.values():
+            reasons[f["why"]] = reasons.get(f["why"], 0) + 1
+        lines += ["", f"Videos that failed ({len(yt_fail)}), by reason:", ""] + [
+            f"- {n}x {why}" for why, n in sorted(reasons.items(), key=lambda x: -x[1])[:5]]
     if check["broken"]:
         lines += ["", "Pages with missing files:", ""] + [
             f"- {t}: {', '.join(m[:3])}" for t, m in list(check["broken"].items())[:10]]
@@ -584,6 +690,9 @@ def write_status(state: dict, discovered: Dict[str, Optional[int]],
     if gh_out:
         with open(gh_out, "a", encoding="utf-8") as fh:
             fh.write(f"remaining={len(remaining)}\nfetched={stats['pages']}\n")
+            if videos:
+                fh.write(f"videos_remaining={videos['remaining']}\n"
+                         f"videos_downloaded={videos['downloaded']}\n")
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
         with open(summary, "a", encoding="utf-8") as fh:
@@ -628,6 +737,8 @@ def main() -> int:
                         help="Stop starting new pages after this many minutes.")
     parser.add_argument("--only", nargs="+", metavar="TITLE",
                         help="Only fetch these page titles.")
+    parser.add_argument("--no-videos", action="store_true",
+                        help="Skip downloading YouTube combo videos.")
     parser.add_argument("--refetch-all", action="store_true",
                         help="Re-download every page even if unchanged.")
     args = parser.parse_args()
@@ -682,9 +793,19 @@ def main() -> int:
                     queue.append(t)
 
     save_state(state)
+    videos = None
+    if not args.only and not args.no_videos:
+        if i < len(queue):
+            # Pages come first; videos wait until every page is done.
+            ids = combos_youtube_ids()
+            videos = {"total": len(ids), "downloaded": 0, "failed_now": 0,
+                      "remaining": 0, "skipped": "waiting for pages to finish"}
+        else:
+            videos = download_youtube(state, deadline)
+    save_state(state)
     create_index()
     write_status(state, discovered, queue[i:], mirror.stats, started, fetcher,
-                 mirror.failed_pages, audit(state))
+                 mirror.failed_pages, audit(state), videos)
     return 0
 
 

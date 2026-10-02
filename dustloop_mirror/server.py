@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Serves the dustloop mirror, translating wiki URLs to local file paths."""
-import os, sys
+import html, os, re, sys
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse, unquote
 
@@ -41,6 +41,10 @@ TAB_FIX_CSS = b"""<style>
 .tabber__tabs {
     display: none !important;
 }
+/* Combo videos downloaded into the mirror */
+.mirror-video { margin: 0.5em 0; max-width: 100%; }
+.mirror-video video { width: 100%; max-width: 720px; display: block; background: #000; }
+.mirror-video figcaption { font-size: 0.9em; opacity: 0.8; }
 </style>
 """
 
@@ -89,6 +93,102 @@ def closest_load_php(base, rel, query):
     return best
 
 
+SCRIPT_RE = re.compile(rb"<script\b[^>]*>.*?</script\s*>", re.I | re.S)
+
+# Keep in sync with YOUTUBE_ID_RE in dustloop_mirror.py.
+YOUTUBE_ID_RE = re.compile(
+    r"(?:youtube(?:-nocookie)?\.com/(?:embed/|watch\?v=|shorts/|v/)|youtu\.be/|ytimg\.com/vi/)"
+    r"([A-Za-z0-9_-]{11})")
+EMBED_FIGURE_RE = re.compile(
+    r"<figure\b[^>]*class=\"[^\"]*embedvideo[^\"]*\"[^>]*>.*?</figure>", re.I | re.S)
+IFRAME_RE = re.compile(r"<iframe\b[^>]*>.*?</iframe>", re.I | re.S)
+FIGCAPTION_RE = re.compile(r"<figcaption\b.*?</figcaption>", re.I | re.S)
+YT_LINK_RE = re.compile(
+    r"href=\"(https?:)?//(?:www\.)?(?:youtube\.com|youtu\.be)/[^\"]*\"", re.I)
+YT_TIME_RE = re.compile(r"[?&](?:amp;)?t=(\d+)")
+YT_DIR = os.path.join("site", "_media", "yt")
+
+
+def local_video(vid):
+    rel = f"{YT_DIR}/{vid}.mp4"
+    return "/" + rel[len("site/"):] if os.path.isfile(os.path.join(os.getcwd(), rel)) else None
+
+
+def video_tag(src, caption=""):
+    return (f'<figure class="mirror-video"><video controls preload="metadata" '
+            f'src="{src}"></video>{caption}</figure>')
+
+
+def swap_youtube(body):
+    """Replace YouTube embeds and links with videos downloaded into the mirror.
+    Embeds whose video hasn't been downloaded are left alone."""
+    def fig(m):
+        block = m.group(0)
+        ids = YOUTUBE_ID_RE.findall(html.unescape(block))
+        src = local_video(ids[0]) if ids else None
+        if not src:
+            return block
+        cap = FIGCAPTION_RE.search(block)
+        return video_tag(src, cap.group(0) if cap else "")
+
+    def frame(m):
+        ids = YOUTUBE_ID_RE.findall(html.unescape(m.group(0)))
+        src = local_video(ids[0]) if ids else None
+        return video_tag(src) if src else m.group(0)
+
+    def link(m):
+        url = html.unescape(m.group(0))
+        ids = YOUTUBE_ID_RE.findall(url)
+        src = local_video(ids[0]) if ids else None
+        if not src:
+            return m.group(0)
+        t = YT_TIME_RE.search(url)
+        return f'href="{src}' + (f"#t={t.group(1)}" if t else "") + '"'
+
+    body = EMBED_FIGURE_RE.sub(fig, body)
+    body = IFRAME_RE.sub(frame, body)
+    return YT_LINK_RE.sub(link, body)
+
+
+def status_page():
+    path = os.path.join(os.getcwd(), "status.md")
+    try:
+        text = open(path, encoding="utf-8").read()
+    except OSError:
+        text = "# No status yet\n\nThis mirror was downloaded before status reports existed."
+    out, in_list = [], False
+    for line in text.splitlines():
+        esc = html.escape(line)
+        esc = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", esc)
+        if line.startswith("- "):
+            if not in_list:
+                out.append("<ul>"); in_list = True
+            item = esc[2:]
+            m = re.match(r"(GGST/[^:]+|Guilty Gear -Strive-)(.*)", line[2:])
+            if m:
+                href = "/w/" + m.group(1).replace(" ", "_")
+                item = f'<a href="{html.escape(href)}">{html.escape(m.group(1))}</a>{html.escape(m.group(2))}'
+            out.append(f"<li>{item}</li>")
+            continue
+        if in_list:
+            out.append("</ul>"); in_list = False
+        if line.startswith("# "):
+            out.append(f"<h1>{esc[2:]}</h1>")
+        elif line.strip():
+            out.append(f"<p>{esc}</p>")
+    if in_list:
+        out.append("</ul>")
+    return ("<!DOCTYPE html><html><head><meta charset='utf-8'>"
+            "<meta name='viewport' content='width=device-width'>"
+            "<title>Mirror status</title><style>"
+            "body{font-family:system-ui,sans-serif;max-width:52rem;margin:2rem auto;"
+            "padding:0 1rem;line-height:1.5;color:#222;background:#fafafa}"
+            "h1{font-size:1.5rem}li{margin:.15rem 0}a{color:#b0002a}"
+            "</style></head><body>" + "\n".join(out) +
+            "<p><a href='/w/Guilty_Gear_-Strive-'>Go to the GGST wiki</a></p>"
+            "</body></html>").encode("utf-8")
+
+
 class H(SimpleHTTPRequestHandler):
     def do_GET(self):
         if self.path in ('/', ''):
@@ -97,11 +197,25 @@ class H(SimpleHTTPRequestHandler):
             self.end_headers()
             return
 
+        if self.path.split("?", 1)[0].rstrip("/") == "/_status":
+            body = status_page()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
         translated = self.translate_path(self.path)
         if translated.endswith('.html') and os.path.isfile(translated):
             try:
                 with open(translated, 'rb') as f:
                     body = f.read()
+                # Pages from the old crawler still carry live-site scripts
+                # (e.g. Cloudflare's bot check); they can't work offline.
+                body = SCRIPT_RE.sub(b'', body)
+                if b'youtu' in body or b'ytimg' in body:
+                    body = swap_youtube(body.decode('utf-8', 'replace')).encode('utf-8')
                 if b'</head>' in body:
                     body = body.replace(b'</head>', TAB_FIX_CSS + b'</head>', 1)
                 self.send_response(200)

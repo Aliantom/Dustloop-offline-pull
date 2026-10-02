@@ -47,6 +47,9 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Install yt-dlp (combo videos)
+        run: pip install -U yt-dlp && yt-dlp --version
+
       # Cache is split into restore + save so we can save UNCONDITIONALLY.
       # The default actions/cache@v4 only saves on success — useless here,
       # because long bootstrap runs can hit the timeout, and we'd lose progress.
@@ -125,9 +128,12 @@ jobs:
 
       # Keep going in chunks until every page has been attempted once.
       - name: Queue the next chunk
-        if: steps.mirror.outputs.remaining != '' && steps.mirror.outputs.remaining != '0' && steps.mirror.outputs.fetched != '0'
+        # Pages left and progress made, or videos left and progress made.
+        if: >-
+          (steps.mirror.outputs.remaining != '' && steps.mirror.outputs.remaining != '0' && steps.mirror.outputs.fetched != '0') ||
+          (steps.mirror.outputs.videos_remaining != '' && steps.mirror.outputs.videos_remaining != '0' && steps.mirror.outputs.videos_downloaded != '0')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          echo "${{ steps.mirror.outputs.remaining }} pages left; queueing another run."
+          echo "${{ steps.mirror.outputs.remaining }} pages and ${{ steps.mirror.outputs.videos_remaining }} videos left; queueing another run."
           gh workflow run mirror.yml --ref main -f budget_minutes=60

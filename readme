@@ -51,7 +51,20 @@ Subsequent runs are **much faster** (usually a few minutes) because wget's `--ti
    each run queues the next one until the mirror is complete. After that,
    the daily run only re-downloads pages whose revision changed.
 
-`status.md` in the mirror folder summarizes the last run.
+`status.md` in the mirror folder summarizes the last run. With the server
+running, open `/_status` in the browser to see it.
+
+Every run also audits each GGST page: a page counts as fully rendered only
+when it's in the new format and every stylesheet, image, font and video it
+references is on disk. Pages that fail are re-queued automatically.
+
+**Combo videos:** after all pages are done, YouTube videos embedded on GGST
+`Combos` pages are downloaded with `yt-dlp` at 360p (`DUSTLOOP_YT_HEIGHT`) into
+`site/_media/yt/`, and the server swaps each embed for the local video. Skip
+with `--no-videos`. YouTube sometimes blocks downloads from GitHub's servers;
+failures and their reasons show in the status and are retried after 2 days.
+Downloading from YouTube is against its terms of service; this is meant for
+personal offline viewing only.
 
 Priority pages (fetched first) are listed in `PRIORITY_TITLES` at the top
 of `dustloop_mirror.py`.
