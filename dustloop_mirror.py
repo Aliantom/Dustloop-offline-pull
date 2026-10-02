@@ -279,6 +279,7 @@ class Mirror:
         self.state = state
         self.done_assets: Set[str] = set()   # handled during this run
         self.stats = {"pages": 0, "assets": 0, "css": 0, "failed": 0}
+        self.failed_pages: List[str] = []
 
     # -- assets ------------------------------------------------------------
 
@@ -433,6 +434,7 @@ class Mirror:
         if status != 200:
             logging.warning("Page %s -> %s", title, status)
             self.stats["failed"] += 1
+            self.failed_pages.append(f"{title} ({status})")
             return False, []
         page = body.decode("utf-8", errors="replace")
         linked = sorted({
@@ -478,7 +480,7 @@ def plan(state: dict, discovered: Dict[str, Optional[int]], refetch_all: bool) -
 
 def write_status(state: dict, discovered: Dict[str, Optional[int]],
                  remaining: List[str], stats: dict, started: datetime,
-                 fetcher: Fetcher) -> None:
+                 fetcher: Fetcher, failed_pages: List[str]) -> None:
     total = len(set(discovered) | set(state["pages"]))
     have = sum(1 for t in set(discovered) | set(state["pages"]) if title_to_path(t).exists())
     lines = [
@@ -492,10 +494,16 @@ def write_status(state: dict, discovered: Dict[str, Optional[int]],
         f"- Still to do: {len(remaining)} pages"
         + (" (next run continues from here)" if remaining else " — mirror is complete"),
     ]
+    if failed_pages:
+        lines += ["", f"Pages that failed ({len(failed_pages)}):", ""] + [f"- {t}" for t in failed_pages[:15]]
     if remaining:
         lines += ["", "Next up:", ""] + [f"- {t}" for t in remaining[:15]]
     text = "\n".join(lines) + "\n"
     STATUS_FILE.write_text(text, encoding="utf-8")
+    if os.environ.get("GITHUB_ACTIONS"):
+        # Shows up as a public annotation on the run page.
+        notice = "%0A".join(l for l in lines if l and not l.startswith("#"))
+        print(f"::notice title=Mirror status::{notice}")
     gh_out = os.environ.get("GITHUB_OUTPUT")
     if gh_out:
         with open(gh_out, "a", encoding="utf-8") as fh:
@@ -597,7 +605,8 @@ def main() -> int:
 
     save_state(state)
     create_index()
-    write_status(state, discovered, queue[i:], mirror.stats, started, fetcher)
+    write_status(state, discovered, queue[i:], mirror.stats, started, fetcher,
+                 mirror.failed_pages)
     return 0
 
 
