@@ -2,13 +2,29 @@ name: Mirror Dustloop GGST Wiki
 
 # Runs daily and uploads the mirror as a downloadable artifact.
 # Triggers:
-#   - Scheduled: 07:00 UTC every day
+#   - Scheduled: 07:00 UTC every day (only re-downloads changed pages)
+#   - Push:      a short run whenever the mirror script or this file changes
 #   - Manual:    "Run workflow" button on the Actions tab
+# While pages are still left to download, each run queues the next one,
+# so the mirror fills in chunk by chunk and every chunk is downloadable.
 
 on:
   schedule:
     - cron: '0 7 * * *'
+  push:
+    branches: [main]
+    paths:
+      - dustloop_mirror.py
+      - .github/workflows/mirror.yml
   workflow_dispatch:
+    inputs:
+      budget_minutes:
+        description: Stop starting new pages after this many minutes
+        default: '60'
+
+permissions:
+  contents: read
+  actions: write   # lets a run queue the next chunk
 
 concurrency:
   group: dustloop-mirror
@@ -43,9 +59,6 @@ jobs:
           restore-keys: |
             dustloop-mirror-
 
-      - name: wget version (sanity check)
-        run: wget --version | head -n 1
-
       - name: Show what we restored from cache (if anything)
         run: |
           if [ -d ~/dustloop_mirror ]; then
@@ -56,22 +69,17 @@ jobs:
             echo "No cache — starting fresh."
           fi
 
-      # Run the script with an internal time budget shorter than the job timeout.
-      # If wget hits the budget, we exit cleanly so the cache-save step still
-      # runs and partial progress survives. We do NOT fail the job on timeout
-      # for the same reason.
-      - name: Run the mirror script (with 5h budget)
+      # The script stops starting new pages once its budget is used up and
+      # saves progress after every page, so nothing is lost. `timeout` is
+      # only a safety net. We never fail the job, so the cache always saves.
+      - name: Run the mirror script
+        id: mirror
+        env:
+          BUDGET: ${{ github.event_name == 'push' && '20' || github.event_name == 'schedule' && '290' || inputs.budget_minutes || '60' }}
         run: |
           set +e
-          timeout 18000 python dustloop_mirror.py
-          code=$?
-          set -e
-          case "$code" in
-            0)   echo "Mirror completed successfully." ;;
-            124) echo "::warning::Mirror hit 5h time budget — cache will be saved and resumed next run." ;;
-            *)   echo "::warning::Mirror exited with code $code — cache will still be saved." ;;
-          esac
-          # Always succeed so the rest of the job runs.
+          timeout 18000 python dustloop_mirror.py --budget-minutes "$BUDGET"
+          echo "Mirror script exited with code $?"
           exit 0
 
       - name: Show what was downloaded
@@ -114,3 +122,12 @@ jobs:
           path: ~/dustloop_mirror.tar.gz
           retention-days: 30
           if-no-files-found: warn
+
+      # Keep going in chunks until every page has been attempted once.
+      - name: Queue the next chunk
+        if: steps.mirror.outputs.remaining != '' && steps.mirror.outputs.remaining != '0' && steps.mirror.outputs.fetched != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "${{ steps.mirror.outputs.remaining }} pages left; queueing another run."
+          gh workflow run mirror.yml --ref main -f budget_minutes=60

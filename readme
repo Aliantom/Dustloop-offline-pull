@@ -8,19 +8,7 @@ The output is plain HTML with all images/CSS/JS, viewable in any browser — no 
 
 ## Requirements
 
-- **Python 3.8+**
-- **wget** (the script uses wget under the hood — it's the right tool for recursive mirroring)
-
-### Installing wget
-
-| Platform | Command |
-|---|---|
-| macOS | `brew install wget` |
-| Ubuntu/Debian | `sudo apt install wget` |
-| Fedora | `sudo dnf install wget` |
-| Windows | `choco install wget` (Chocolatey), or use Git Bash, or use WSL |
-
-Verify it works: `wget --version`
+- **Python 3.8+** (standard library only — wget is no longer needed)
 
 ---
 
@@ -48,27 +36,27 @@ Subsequent runs are **much faster** (usually a few minutes) because wget's `--ti
 
 ---
 
-## How daily runs keep discovering new pages
+## How it works
 
-`wget`'s recursive crawl only finds pages it can reach by following links from
-pages it has already downloaded. If a page isn't well-linked from elsewhere on
-the wiki, pure link-following will never find it — no matter how many times
-the job reruns, since each run just rediscovers the same link graph. That
-used to mean the mirror could run forever and keep existing pages fresh
-without ever growing to cover new sections.
+1. The wiki's API lists every page titled `GGST/...` plus the GGST main page,
+   with each page's latest revision id. Pages linked from downloaded pages
+   are picked up too, in case the API misses any.
+2. Each new or changed page is downloaded along with every stylesheet,
+   image and font it needs. Nothing outside the GGST section is crawled.
+3. Links are rewritten as each page is saved, so pages render correctly
+   even if a run is cut off partway through. Scripts are stripped; the
+   server injects CSS so tabbed content shows without JavaScript.
+4. Progress is saved after every page (`state.json`), and runs have a time
+   budget (`--budget-minutes`). On GitHub Actions, while pages remain,
+   each run queues the next one until the mirror is complete. After that,
+   the daily run only re-downloads pages whose revision changed.
 
-To fix this, every run now also asks the wiki's own API
-(`action=query&list=allpages`) for the complete, current list of GGST page
-titles and feeds that list to `wget` as explicit seed URLs, in addition to
-the normal recursive crawl. `--timestamping` still applies per page, so
-pages already on disk and unchanged stay cheap (a quick conditional check);
-only pages missing locally — new pages, or ones a previous run never reached
-— get fully downloaded. As Dustloop's wiki grows, tomorrow's run picks up
-whatever's new automatically.
+`status.md` in the mirror folder summarizes the last run.
 
-If the wiki's API is unreachable when a run starts (e.g. no network), the
-script logs a warning and falls back to the plain recursive crawl from
-`BASE_URL`, same as before — it never fails the whole run over this.
+Priority pages (fetched first) are listed in `PRIORITY_TITLES` at the top
+of `dustloop_mirror.py`.
+
+To pull the newest run into a codespace: `bash .devcontainer/refresh.sh --force`
 
 ---
 
