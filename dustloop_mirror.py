@@ -251,6 +251,28 @@ MEDIA_TAG_RE = re.compile(r"<(?:video|source|audio|track)\b[^>]*>", re.I)
 ATTR_RE = re.compile(r"(\s(src|href|data-src|poster)\s*=\s*)(\"[^\"]*\"|'[^']*')", re.I)
 CSS_URL_RE = re.compile(r"url\(\s*(['\"]?)([^'\")]+)\1\s*\)", re.I)
 CSS_IMPORT_RE = re.compile(r"@import\s+(['\"])([^'\"]+)\1", re.I)
+# Frame Data rows keep their details (incl. hitbox images) as escaped HTML in
+# a data-mw-details attribute that the live site's JavaScript expands.
+DETAILS_ROW_RE = re.compile(
+    r"<tr\b([^>']*?)\sdata-mw-details='([^']*)'([^>]*)>(.*?)</tr\s*>", re.I | re.S)
+CELL_RE = re.compile(r"<t[dh]\b", re.I)
+
+
+def expand_details_rows(page: str) -> str:
+    """Turn each hidden details attribute into a native <details> row right
+    under its table row, so it works without JavaScript."""
+    def fix(m):
+        before, details, after, cells = m.group(1), m.group(2), m.group(3), m.group(4)
+        inner = html.unescape(details).strip()
+        row = f"<tr{before}{after}>{cells}</tr>"
+        if not inner:
+            return row
+        span = max(1, len(CELL_RE.findall(cells)))
+        return (row + f'<tr class="mirror-details"><td colspan="{span}"><details>'
+                f"<summary>Details &amp; hitboxes</summary>{inner}</details></td></tr>")
+    return DETAILS_ROW_RE.sub(fix, page)
+
+
 PAGE_LINK_RE = re.compile(r"href=\"/w/([^\"#?]+)", re.I)
 
 
@@ -376,6 +398,7 @@ class Mirror:
     def rewrite_page(self, page: str, page_url: str) -> str:
         page = SCRIPT_RE.sub("", page)
         page = NOSCRIPT_RE.sub("", page)
+        page = expand_details_rows(page)
         page = SRCSET_RE.sub("", page)
 
         def fix_attr(m, tag_kind):
