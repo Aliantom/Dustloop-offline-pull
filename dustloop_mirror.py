@@ -520,6 +520,14 @@ def audit(state: dict) -> dict:
             refs += css_cache[css]
         refs += [u for _, u in CSS_URL_RE.findall(text) if u.startswith("/")]
         missing = sorted({r for r in refs if not exists(r)})
+        if missing and len(result.setdefault("samples", [])) < 3:
+            # Show the markup around a missing file, to see why it wasn't fetched.
+            ref = missing[0]
+            at = text.find(ref)
+            start = text.rfind("<", 0, max(at, 0))
+            start = max(0, start - 200)
+            snippet = text[start:at + len(ref) + 150] if at >= 0 else ref
+            result["samples"].append(f"{title}: " + " ".join(snippet.split()))
         if missing:
             result["broken"][title] = missing
             result["missing_files"] += len(missing)
@@ -675,6 +683,8 @@ def write_status(state: dict, discovered: Dict[str, Optional[int]],
             reasons[f["why"]] = reasons.get(f["why"], 0) + 1
         lines += ["", f"Videos that failed ({len(yt_fail)}), by reason:", ""] + [
             f"- {n}x {why}" for why, n in sorted(reasons.items(), key=lambda x: -x[1])[:5]]
+    for sample in check.get("samples", []):
+        lines += ["", "Markup around a missing file: " + sample.replace("%", "%25")[:900]]
     if check["broken"]:
         lines += ["", "Pages with missing files:", ""] + [
             f"- {t}: {', '.join(m[:3])}" for t, m in list(check["broken"].items())[:10]]
