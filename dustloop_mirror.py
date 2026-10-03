@@ -68,14 +68,24 @@ SECTIONS = {
     "gbvsr": {"name": "Granblue Fantasy Versus: Rising",
               "main": "Granblue Fantasy Versus: Rising", "prefix": None,
               "search": "Granblue Fantasy Versus Rising", "priority": []},
-    "tokon": {"name": "Marvel Tokon: Fighting Souls", "main": None, "prefix": None,
-              "search": "Tokon", "priority": []},
+    # Dustloop hosts Tokon under the "MTFS/" prefix; its main page title uses
+    # "Tōkon" (with a macron), so a plain "Tokon" title search finds nothing.
+    # "main" may be a redirect: it is resolved to the real title on the wiki.
+    "tokon": {"name": "Marvel Tokon: Fighting Souls", "main": "MTFS",
+              "main_aliases": ["Marvel Tokon Fighting Souls",
+                               "MARVEL Tōkon: Fighting Souls"],
+              "prefix": "MTFS/",
+              "search": ["Tōkon", "Tokon", "Fighting Souls", "MTFS"],
+              "priority": []},
 }
 SECTION_ORDER = ["ggst", "gbvsr", "tokon"]
 SECTION = "ggst"
 
 # Set from the chosen section by configure_section().
 MAIN_TITLE = "Guilty Gear -Strive-"
+# Other titles that redirect to MAIN_TITLE (e.g. "MTFS"); links to them are
+# pointed at the saved main page, since redirects aren't saved as files.
+MAIN_ALIASES: List[str] = []
 TITLE_PREFIXES = ["GGST/"]
 
 # Fetched first, in this order, before everything else.
@@ -255,11 +265,35 @@ def api_first_ok(fetcher: "Fetcher", params: dict) -> Optional[dict]:
     return None
 
 
+def resolve_title(fetcher: "Fetcher", candidates: List[str]) -> Optional[str]:
+    """Return the real wiki title of the first candidate page that exists,
+    following redirects. Returns None if the API can't tell."""
+    data = api_first_ok(fetcher, {
+        "action": "query", "format": "json", "redirects": "1",
+        "titles": "|".join(candidates), "prop": "info"})
+    if not data:
+        return None
+    q = data.get("query", {})
+    mapping = {}
+    for kind in ("normalized", "redirects"):
+        for m in q.get(kind, []):
+            mapping[m["from"]] = m["to"]
+    existing = {p["title"] for p in q.get("pages", {}).values() if "missing" not in p
+                and "invalid" not in p}
+    for c in candidates:
+        t = c
+        for _ in range(3):
+            t = mapping.get(t, t)
+        if t in existing:
+            return t
+    return None
+
+
 def configure_section(key: str, fetcher: "Fetcher", state: dict) -> Optional[str]:
     """Point the module at one game. Looks up the game's main page and its
     page-title prefix on the wiki when not configured, remembering the result.
     Returns an error message if the game can't be found."""
-    global SECTION, MAIN_TITLE, TITLE_PREFIXES, PRIORITY_TITLES, STATE_FILE, STATUS_FILE
+    global SECTION, MAIN_TITLE, MAIN_ALIASES, TITLE_PREFIXES, PRIORITY_TITLES, STATE_FILE, STATUS_FILE
     cfg = SECTIONS[key]
     SECTION = key
     STATE_FILE = OUTPUT_DIR / f"state-{key}.json"
@@ -271,17 +305,27 @@ def configure_section(key: str, fetcher: "Fetcher", state: dict) -> Optional[str
     state.update(load_state())
 
     resolved = state.setdefault("section", {})
-    main = cfg["main"] or resolved.get("main")
+    main = resolved.get("main")
+    if not main and cfg["main"]:
+        main = resolve_title(fetcher, [cfg["main"]] + list(cfg.get("main_aliases", [])))
     if not main:
-        data = api_first_ok(fetcher, {
-            "action": "query", "format": "json", "list": "search",
-            "srsearch": cfg["search"], "srnamespace": "0", "srwhat": "title",
-            "srlimit": "20"})
-        hits = [h["title"] for h in (data or {}).get("query", {}).get("search", [])]
-        tops = [t for t in hits if "/" not in t]
-        if not tops:
+        terms = cfg["search"] if isinstance(cfg["search"], list) else [cfg["search"]]
+        hits: List[str] = []
+        for term in terms:
+            data = api_first_ok(fetcher, {
+                "action": "query", "format": "json", "list": "search",
+                "srsearch": term, "srnamespace": "0", "srwhat": "title",
+                "srlimit": "20"})
+            hits = [h["title"] for h in (data or {}).get("query", {}).get("search", [])]
+            tops = [t for t in hits if "/" not in t]
+            if tops:
+                main = tops[0]
+                break
+        if not main and cfg["main"]:
+            # The API may be unreachable; fall back to the configured title.
+            main = cfg["main"]
+        if not main:
             return f"couldn't find a {cfg['name']} section on Dustloop (search: {hits[:5]})"
-        main = tops[0]
     prefix = cfg["prefix"] or resolved.get("prefix")
     if not prefix:
         status, body = fetcher.get(title_to_url(main))
@@ -297,6 +341,8 @@ def configure_section(key: str, fetcher: "Fetcher", state: dict) -> Optional[str
         prefix = max(counts, key=counts.get).replace("_", " ") + "/"
     resolved.update({"main": main, "prefix": prefix})
     MAIN_TITLE = main
+    MAIN_ALIASES = [t for t in ([cfg["main"]] if cfg["main"] else []) + list(cfg.get("main_aliases", []))
+                    if t and t.replace("_", " ") != main]
     TITLE_PREFIXES = [prefix]
     PRIORITY_TITLES = list(cfg["priority"]) + [main]
     logging.info("Section %s: main page %r, prefix %r", key, main, prefix)
@@ -550,6 +596,12 @@ class Mirror:
             return m.group(0)
 
         page = ATTR_RE.sub(fix_other, page)
+        if MAIN_ALIASES:
+            main_href = "/w/" + urllib.parse.quote(MAIN_TITLE.replace(" ", "_"), safe="/:,()!*~-_.")
+            names = "|".join(re.escape(urllib.parse.quote(a.replace(" ", "_"), safe="/:,()!*~-_."))
+                             for a in MAIN_ALIASES)
+            page = re.sub(r'href="/w/(?:%s)(?=["#])' % names,
+                          lambda m: f'href="{main_href}', page)
         return page
 
     def fetch_page(self, title: str) -> Tuple[bool, List[str]]:
