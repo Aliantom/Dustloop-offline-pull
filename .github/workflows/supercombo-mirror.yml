@@ -1,0 +1,114 @@
+name: Mirror Supercombo Avatar Legends Wiki
+
+# Runs daily and uploads the mirror as a downloadable artifact.
+# Triggers:
+#   - Scheduled: 07:15 UTC every day (offset from the Dustloop mirror job)
+#   - Manual:    "Run workflow" button on the Actions tab
+
+on:
+  schedule:
+    - cron: '15 7 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: supercombo-mirror
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    # Avatar Legends is one section of the wiki, not the whole site, so this
+    # should finish well inside an hour once bootstrapped.
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Cache is split into restore + save so we can save UNCONDITIONALLY.
+      # The default actions/cache@v4 only saves on success — useless here,
+      # because a run can hit the timeout, and we'd lose progress.
+      - name: Restore previous mirror from cache
+        id: cache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/supercombo_mirror
+          key: supercombo-mirror-${{ github.run_id }}
+          restore-keys: |
+            supercombo-mirror-
+
+      - name: wget version (sanity check)
+        run: wget --version | head -n 1
+
+      - name: Show what we restored from cache (if anything)
+        run: |
+          if [ -d ~/supercombo_mirror ]; then
+            echo "Cache hit — resuming from previous mirror state:"
+            du -sh ~/supercombo_mirror
+            find ~/supercombo_mirror/site -type f 2>/dev/null | wc -l | xargs echo "Files in mirror:"
+          else
+            echo "No cache — starting fresh."
+          fi
+
+      # Run the script with an internal time budget shorter than the job timeout.
+      # If wget hits the budget, we exit cleanly so the cache-save step still
+      # runs and partial progress survives. We do NOT fail the job on timeout
+      # for the same reason.
+      - name: Run the mirror script (with 75m budget)
+        run: |
+          set +e
+          timeout 4500 python supercombo_mirror.py
+          code=$?
+          set -e
+          case "$code" in
+            0)   echo "Mirror completed successfully." ;;
+            124) echo "::warning::Mirror hit 75m time budget — cache will be saved and resumed next run." ;;
+            *)   echo "::warning::Mirror exited with code $code — cache will still be saved." ;;
+          esac
+          # Always succeed so the rest of the job runs.
+          exit 0
+
+      - name: Show what was downloaded
+        if: always()
+        run: |
+          echo "Mirror size:"
+          du -sh ~/supercombo_mirror 2>/dev/null || echo "(no mirror dir)"
+          echo "Files in mirror:"
+          find ~/supercombo_mirror -type f 2>/dev/null | wc -l
+          echo "Top-level layout:"
+          ls -la ~/supercombo_mirror 2>/dev/null || true
+
+      # Save cache UNCONDITIONALLY (note `if: always()`), so even on timeout,
+      # partial progress is preserved for the next run.
+      - name: Save mirror to cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ~/supercombo_mirror
+          key: supercombo-mirror-${{ github.run_id }}
+
+      - name: Compress the mirror
+        if: always()
+        run: |
+          if [ -d ~/supercombo_mirror ]; then
+            cd ~
+            tar -czf supercombo_mirror.tar.gz supercombo_mirror
+            ls -lh supercombo_mirror.tar.gz
+          else
+            echo "No mirror to compress."
+            exit 1
+          fi
+
+      - name: Upload as workflow artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: supercombo-avatar-legends-mirror
+          path: ~/supercombo_mirror.tar.gz
+          retention-days: 30
+          if-no-files-found: warn
