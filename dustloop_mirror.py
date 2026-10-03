@@ -543,7 +543,10 @@ def audit(state: dict) -> dict:
             refs += css_cache[css]
         refs += [u for _, u in CSS_URL_RE.findall(text) if u.startswith("/")]
         missing = sorted({r for r in refs if not exists(r)})
-        if missing and len(result.setdefault("samples", [])) < 3:
+        kind = title.rsplit("/", 1)[-1]
+        seen_kinds = result.setdefault("sample_kinds", set())
+        if missing and kind not in seen_kinds and len(result.setdefault("samples", [])) < 4:
+            seen_kinds.add(kind)
             # Show the markup around a missing file, to see why it wasn't fetched.
             ref = missing[0]
             at = text.find(ref)
