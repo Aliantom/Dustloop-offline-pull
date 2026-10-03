@@ -46,6 +46,8 @@ TAB_FIX_CSS = b"""<style>
 .mirror-details summary { cursor: pointer; font-weight: 600; padding: 0.2em 0; }
 .mirror-details table { margin: 0.3em 0; }
 .mirror-details figure { display: inline-block; margin: 0.3em; vertical-align: top; }
+/* Consent overlays for embedded videos need JavaScript; hide them. */
+.embedvideo-privacyNotice, .embedvideo-consent { display: none !important; }
 /* Combo videos downloaded into the mirror */
 .mirror-video { margin: 0.5em 0; max-width: 100%; }
 .mirror-video video { width: 100%; max-width: 720px; display: block; background: #000; }

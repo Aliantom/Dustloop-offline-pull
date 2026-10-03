@@ -245,9 +245,12 @@ def is_ggst_title(title: str) -> bool:
 SCRIPT_RE = re.compile(r"<script\b[^>]*>.*?</script\s*>", re.I | re.S)
 NOSCRIPT_RE = re.compile(r"</?noscript\b[^>]*>", re.I)
 SRCSET_RE = re.compile(r"\s(?:data-)?srcset\s*=\s*(\"[^\"]*\"|'[^']*')", re.I)
-LINK_TAG_RE = re.compile(r"<link\b[^>]*>", re.I)
-IMG_TAG_RE = re.compile(r"<img\b[^>]*>", re.I)
-MEDIA_TAG_RE = re.compile(r"<(?:video|source|audio|track)\b[^>]*>", re.I)
+# Tag matchers skip over quoted attribute values, which can contain a raw ">"
+# (e.g. alt="... >:(").
+_ATTRS = r"""(?:[^>"']|"[^"]*"|'[^']*')*"""
+LINK_TAG_RE = re.compile(r"<link\b" + _ATTRS + r">", re.I)
+IMG_TAG_RE = re.compile(r"<img\b" + _ATTRS + r">", re.I)
+MEDIA_TAG_RE = re.compile(r"<(?:video|source|audio|track)\b" + _ATTRS + r">", re.I)
 ATTR_RE = re.compile(r"(\s(src|href|data-src|poster)\s*=\s*)(\"[^\"]*\"|'[^']*')", re.I)
 CSS_URL_RE = re.compile(r"url\(\s*(['\"]?)([^'\")]+)\1\s*\)", re.I)
 CSS_IMPORT_RE = re.compile(r"@import\s+(['\"])([^'\"]+)\1", re.I)
