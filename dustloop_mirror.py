@@ -34,6 +34,8 @@ Output:
 
 import argparse
 import hashlib
+import http.client
+import traceback
 import html
 import json
 import logging
@@ -109,6 +111,9 @@ class Fetcher:
         self.requests = 0
 
     def get(self, url: str) -> Tuple[Optional[int], bytes]:
+        # Percent-encode non-ASCII characters (e.g. "R․I․S․C․" or "×" in file
+        # names) while leaving existing %xx escapes alone.
+        url = urllib.parse.quote(url, safe=":/?#[]@!$&'()*+,;=%~-._")
         for attempt in range(3):
             pause = self.wait * random.uniform(0.5, 1.5) - (time.time() - self.last)
             if pause > 0:
@@ -126,9 +131,13 @@ class Fetcher:
                     time.sleep(10 * (attempt + 1))
                     continue
                 return exc.code, b""
-            except (urllib.error.URLError, OSError) as exc:
+            except (urllib.error.URLError, OSError, http.client.HTTPException) as exc:
+                # HTTPException covers downloads cut off midway (IncompleteRead).
                 logging.warning("Network error on %s (%s), retrying", url, exc)
                 time.sleep(5 * (attempt + 1))
+            except ValueError as exc:
+                logging.warning("Bad URL %s (%s); skipping", url, exc)
+                return None, b""
         return None, b""
 
 
@@ -333,8 +342,13 @@ class Mirror:
             self.stats["failed"] += 1
             logging.info("  %s -> %s", site_path, status)
             return False
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(body)
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(body)
+        except OSError as exc:  # e.g. a file name too long for the disk
+            logging.warning("  could not save %s (%s)", site_path, exc)
+            self.stats["failed"] += 1
+            return False
         return True
 
     def ensure_asset(self, site_path: str) -> str:
@@ -818,7 +832,13 @@ def main() -> int:
             break
         title = queue[i]
         i += 1
-        ok, linked = mirror.fetch_page(title)
+        try:
+            ok, linked = mirror.fetch_page(title)
+        except Exception as exc:
+            # One bad page must never stop the run.
+            logging.error("Error on %s:\n%s", title, traceback.format_exc())
+            mirror.failed_pages.append(f"{title} (error: {type(exc).__name__}: {exc})"[:200])
+            ok, linked = False, []
         if ok:
             state["pages"][title] = {"revid": discovered.get(title),
                                      "fetched": now().isoformat()}
@@ -840,7 +860,12 @@ def main() -> int:
             videos = {"total": len(ids), "downloaded": 0, "failed_now": 0,
                       "remaining": 0, "skipped": "waiting for pages to finish"}
         else:
-            videos = download_youtube(state, deadline)
+            try:
+                videos = download_youtube(state, deadline)
+            except Exception as exc:
+                logging.error("Video phase failed:\n%s", traceback.format_exc())
+                videos = {"total": 0, "downloaded": 0, "failed_now": 0, "remaining": 0,
+                          "skipped": f"error: {type(exc).__name__}: {exc}"[:150]}
     save_state(state)
     create_index()
     write_status(state, discovered, queue[i:], mirror.stats, started, fetcher,
@@ -849,4 +874,13 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception:
+        # Last-resort report so a crash is visible on the run page.
+        tb = traceback.format_exc()
+        print(tb, file=sys.stderr)
+        if os.environ.get("GITHUB_ACTIONS"):
+            last = " | ".join(tb.strip().splitlines()[-6:]).replace("%", "%25")
+            print(f"::notice title=Mirror status::CRASHED: {last}")
+        sys.exit(1)
