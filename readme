@@ -36,6 +36,19 @@ Subsequent runs are **much faster** (usually a few minutes) because wget's `--ti
 
 ---
 
+## Games mirrored
+
+Set in `SECTIONS` / `SECTION_ORDER` at the top of `dustloop_mirror.py`:
+`ggst` (Guilty Gear -Strive-), then `gbvsr` (Granblue Fantasy Versus: Rising),
+then `tokon` (Marvel Tokon). A game's main page and page prefix are looked up
+on the wiki automatically when not given. Each game is finished before the next
+one starts, and each is stored separately on the `mirror-data` release as split
+tar files (release assets have no total size cap; the Actions cache is 10 GB).
+
+In a codespace: `bash .devcontainer/refresh.sh --force` pulls every game, or
+`MIRROR_SECTIONS="ggst" bash .devcontainer/refresh.sh --force` just one. The
+server's home page lists the games; `/_status` shows each game's report.
+
 ## How it works
 
 1. The wiki's API lists every page titled `GGST/...` plus the GGST main page,

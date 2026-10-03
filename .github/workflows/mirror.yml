@@ -1,12 +1,18 @@
-name: Mirror Dustloop GGST Wiki
+name: Mirror Dustloop
 
-# Runs daily and uploads the mirror as a downloadable artifact.
+# Mirrors selected games from the Dustloop wiki (see SECTIONS in
+# dustloop_mirror.py): GGST first, then Granblue Fantasy Versus: Rising, then
+# Marvel Tokon. Each game is stored separately as split tar files on the
+# "mirror-data" release, which has no size cap (the Actions cache tops out
+# at 10 GB). Your codespace downloads them with .devcontainer/refresh.sh.
+#
 # Triggers:
-#   - Scheduled: 07:00 UTC every day (only re-downloads changed pages)
-#   - Push:      a short run whenever the mirror script or this file changes
-#   - Manual:    "Run workflow" button on the Actions tab
-# While pages are still left to download, each run queues the next one,
-# so the mirror fills in chunk by chunk and every chunk is downloadable.
+#   - Scheduled: 07:00 UTC daily, starting with GGST; each game hands off to
+#     the next once it has nothing left to do
+#   - Push:      a short GGST run whenever the script or this file changes
+#   - Manual:    "Run workflow" on the Actions tab (pick a game + time budget)
+# While a game still has pages or videos left, each run queues another run
+# of the same game; when it's done, it queues the next game.
 
 on:
   schedule:
@@ -18,26 +24,31 @@ on:
       - .github/workflows/mirror.yml
   workflow_dispatch:
     inputs:
+      section:
+        description: Which game (ggst, gbvsr, tokon)
+        default: ggst
       budget_minutes:
         description: Stop starting new pages after this many minutes
         default: '60'
 
 permissions:
-  contents: read
-  actions: write   # lets a run queue the next chunk
+  contents: write   # upload the mirror to the release
+  actions: write    # queue the next run
 
 concurrency:
   group: dustloop-mirror
-  # A newer run replaces one in progress; progress is saved either way
-  # (the cache save step runs even on cancel).
+  # A newer run replaces one in progress; the save step still runs on
+  # cancel (if: always()), so progress isn't lost.
   cancel-in-progress: true
+
+env:
+  SECTION: ${{ inputs.section || 'ggst' }}
+  RELEASE_TAG: mirror-data
+  GH_TOKEN: ${{ github.token }}
 
 jobs:
   mirror:
     runs-on: ubuntu-latest
-    # GitHub free-tier hard cap is 6 hours per job; 350 minutes leaves headroom.
-    # The bootstrap (first full mirror) may need 1-3 runs of this length.
-    # Daily incremental runs after bootstrap finish in minutes.
     timeout-minutes: 350
 
     steps:
@@ -52,90 +63,69 @@ jobs:
       - name: Install yt-dlp (combo videos)
         run: pip install -U yt-dlp && yt-dlp --version
 
-      # Cache is split into restore + save so we can save UNCONDITIONALLY.
-      # The default actions/cache@v4 only saves on success — useless here,
-      # because long bootstrap runs can hit the timeout, and we'd lose progress.
-      - name: Restore previous mirror from cache
-        id: cache-restore
+      - name: Make sure the storage release exists
+        run: |
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || \
+            gh release create "$RELEASE_TAG" --title "Mirror data" \
+              --notes "Mirror files, one set of tar parts per game. Updated automatically; download with .devcontainer/refresh.sh."
+
+      - name: Restore this game's mirror from the release
+        id: restore
+        run: |
+          mkdir -p /tmp/parts
+          if gh release download "$RELEASE_TAG" --pattern "mirror-$SECTION.tar.part*" --dir /tmp/parts 2>/dev/null \
+             && ls /tmp/parts/mirror-$SECTION.tar.part* >/dev/null 2>&1; then
+            cat /tmp/parts/mirror-$SECTION.tar.part* | tar -x -C ~
+            rm -rf /tmp/parts
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "Restored $SECTION:"; du -sh ~/dustloop_mirror
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "No saved mirror for $SECTION yet."
+          fi
+
+      # One-time migration: GGST used to live in the Actions cache.
+      - name: Restore GGST from the old cache (first run only)
+        if: steps.restore.outputs.found != 'true' && env.SECTION == 'ggst'
         uses: actions/cache/restore@v4
         with:
           path: ~/dustloop_mirror
-          key: dustloop-mirror-${{ github.run_id }}
+          key: dustloop-mirror-none
           restore-keys: |
             dustloop-mirror-
 
-      - name: Show what we restored from cache (if anything)
-        run: |
-          if [ -d ~/dustloop_mirror ]; then
-            echo "Cache hit — resuming from previous mirror state:"
-            du -sh ~/dustloop_mirror
-            find ~/dustloop_mirror/site -type f 2>/dev/null | wc -l | xargs echo "Files in mirror:"
-          else
-            echo "No cache — starting fresh."
-          fi
-
-      # The script stops starting new pages once its budget is used up and
-      # saves progress after every page, so nothing is lost. `timeout` is
-      # only a safety net. We never fail the job, so the cache always saves.
       - name: Run the mirror script
         id: mirror
         env:
           BUDGET: ${{ github.event_name == 'push' && '5' || github.event_name == 'schedule' && '290' || inputs.budget_minutes || '60' }}
         run: |
           set +e
-          timeout 18000 python dustloop_mirror.py --budget-minutes "$BUDGET"
+          timeout 18000 python dustloop_mirror.py --section "$SECTION" --budget-minutes "$BUDGET"
           echo "Mirror script exited with code $?"
           exit 0
 
       - name: Show what was downloaded
         if: always()
         run: |
-          echo "Mirror size:"
           du -sh ~/dustloop_mirror 2>/dev/null || echo "(no mirror dir)"
-          echo "Files in mirror:"
-          find ~/dustloop_mirror -type f 2>/dev/null | wc -l
-          echo "Top-level layout:"
-          ls -la ~/dustloop_mirror 2>/dev/null || true
+          find ~/dustloop_mirror -type f 2>/dev/null | wc -l | xargs echo "Files:"
 
-      # Save cache UNCONDITIONALLY (note `if: always()`). This is the critical
-      # difference from the previous workflow — even on timeout, partial
-      # progress is preserved for the next run.
-      - name: Save mirror to cache
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: ~/dustloop_mirror
-          key: dustloop-mirror-${{ github.run_id }}
-
-      - name: Compress the mirror
+      # Release assets are capped at 2 GB each, so the tar is split into parts.
+      - name: Save this game's mirror to the release
         if: always()
         run: |
-          if [ -d ~/dustloop_mirror ]; then
-            cd ~
-            tar -czf dustloop_mirror.tar.gz dustloop_mirror
-            ls -lh dustloop_mirror.tar.gz
-          else
-            echo "No mirror to compress."
-            exit 1
-          fi
+          [ -d ~/dustloop_mirror ] || { echo "Nothing to save."; exit 0; }
+          mkdir -p /tmp/out && cd /tmp/out && rm -f mirror-$SECTION.tar.part*
+          tar -C ~ -cf - dustloop_mirror | split -b 1900m -d -a 2 - "mirror-$SECTION.tar.part"
+          ls -lh
+          gh release upload "$RELEASE_TAG" mirror-$SECTION.tar.part* --clobber -R "$GITHUB_REPOSITORY"
+          # Remove leftover parts from an earlier, larger upload.
+          for old in $(gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' | grep "^mirror-$SECTION.tar.part"); do
+            [ -f "$old" ] || gh release delete-asset "$RELEASE_TAG" "$old" -y -R "$GITHUB_REPOSITORY"
+          done
 
-      - name: Upload as workflow artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: dustloop-mirror
-          path: ~/dustloop_mirror.tar.gz
-          retention-days: 30
-          if-no-files-found: warn
-
-      # Keep going in chunks until every page has been attempted once.
-      - name: Queue the next chunk
-        # Pages left and progress made, or videos left and progress made.
-        if: >-
-          (steps.mirror.outputs.remaining != '' && steps.mirror.outputs.remaining != '0' && steps.mirror.outputs.fetched != '0') ||
-          (steps.mirror.outputs.videos_remaining != '' && steps.mirror.outputs.videos_remaining != '0' && steps.mirror.outputs.videos_downloaded != '0')
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Queue the next run
+        if: steps.mirror.outputs.next_section != ''
         run: |
-          echo "${{ steps.mirror.outputs.remaining }} pages and ${{ steps.mirror.outputs.videos_remaining }} videos left; queueing another run."
-          gh workflow run mirror.yml --ref main -f budget_minutes=60
+          echo "Next: ${{ steps.mirror.outputs.next_section }}"
+          gh workflow run mirror.yml --ref main -f section=${{ steps.mirror.outputs.next_section }} -f budget_minutes=60

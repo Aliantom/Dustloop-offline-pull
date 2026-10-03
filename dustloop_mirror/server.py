@@ -157,11 +157,35 @@ def swap_youtube(body):
     return YT_LINK_RE.sub(link, body)
 
 
+PAGE_STYLE = ("body{font-family:system-ui,sans-serif;max-width:52rem;margin:2rem auto;"
+              "padding:0 1rem;line-height:1.5;color:#222;background:#fafafa}"
+              "h1{font-size:1.5rem}li{margin:.15rem 0}a{color:#b0002a}"
+              ".games a{display:block;font-size:1.2rem;padding:.6rem .9rem;margin:.4rem 0;"
+              "background:#fff;border:1px solid #ddd;border-radius:8px;text-decoration:none}")
+
+
+def simple_page(title, body_html):
+    return ("<!DOCTYPE html><html><head><meta charset='utf-8'>"
+            "<meta name='viewport' content='width=device-width'>"
+            f"<title>{html.escape(title)}</title><style>{PAGE_STYLE}</style></head>"
+            f"<body>{body_html}</body></html>").encode("utf-8")
+
+
+def home_page():
+    """List each mirrored game's main page (top-level pages under site/w)."""
+    w = os.path.join(os.getcwd(), "site", "w")
+    games = sorted(f[:-5] for f in os.listdir(w) if f.endswith(".html")) if os.path.isdir(w) else []
+    links = "".join(f'<a href="/w/{html.escape(g)}">{html.escape(g.replace("_", " "))}</a>' for g in games)
+    return simple_page("Dustloop mirror", "<h1>Dustloop mirror</h1>"
+                       f"<div class='games'>{links or '<p>No games downloaded yet.</p>'}</div>"
+                       "<p><a href='/_status'>Mirror status</a></p>")
+
+
 def status_page():
-    path = os.path.join(os.getcwd(), "status.md")
-    try:
-        text = open(path, encoding="utf-8").read()
-    except OSError:
+    here = os.getcwd()
+    files = sorted(f for f in os.listdir(here) if f.startswith("status") and f.endswith(".md"))
+    text = "\n\n".join(open(os.path.join(here, f), encoding="utf-8").read() for f in files)
+    if not text:
         text = "# No status yet\n\nThis mirror was downloaded before status reports existed."
     out, in_list = [], False
     for line in text.splitlines():
@@ -171,7 +195,7 @@ def status_page():
             if not in_list:
                 out.append("<ul>"); in_list = True
             item = esc[2:]
-            m = re.match(r"(GGST/[^:]+|Guilty Gear -Strive-)(.*)", line[2:])
+            m = re.match(r"([A-Z][A-Za-z0-9.+-]*/[^:(]+?)(\s*(?::|\().*|$)", line[2:])
             if m:
                 href = "/w/" + m.group(1).replace(" ", "_")
                 item = f'<a href="{html.escape(href)}">{html.escape(m.group(1))}</a>{html.escape(m.group(2))}'
@@ -185,23 +209,18 @@ def status_page():
             out.append(f"<p>{esc}</p>")
     if in_list:
         out.append("</ul>")
-    return ("<!DOCTYPE html><html><head><meta charset='utf-8'>"
-            "<meta name='viewport' content='width=device-width'>"
-            "<title>Mirror status</title><style>"
-            "body{font-family:system-ui,sans-serif;max-width:52rem;margin:2rem auto;"
-            "padding:0 1rem;line-height:1.5;color:#222;background:#fafafa}"
-            "h1{font-size:1.5rem}li{margin:.15rem 0}a{color:#b0002a}"
-            "</style></head><body>" + "\n".join(out) +
-            "<p><a href='/w/Guilty_Gear_-Strive-'>Go to the GGST wiki</a></p>"
-            "</body></html>").encode("utf-8")
+    return simple_page("Mirror status", "\n".join(out) + "<p><a href='/'>All games</a></p>")
 
 
 class H(SimpleHTTPRequestHandler):
     def do_GET(self):
         if self.path in ('/', ''):
-            self.send_response(302)
-            self.send_header('Location', LANDING_PAGE)
+            body = home_page()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
+            self.wfile.write(body)
             return
 
         if self.path.split("?", 1)[0].rstrip("/") == "/_status":

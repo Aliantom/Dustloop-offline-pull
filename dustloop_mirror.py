@@ -59,22 +59,34 @@ from typing import Dict, List, Optional, Set, Tuple
 BASE = os.environ.get("DUSTLOOP_BASE", "https://www.dustloop.com").rstrip("/")
 HOSTS = {"www.dustloop.com", "dustloop.com", urllib.parse.urlsplit(BASE).netloc}
 
+# Games to mirror, in order. A game's main page title and page-title prefix
+# are looked up on the wiki when left as None ("search" finds the main page).
+SECTIONS = {
+    "ggst": {"name": "Guilty Gear -Strive-", "main": "Guilty Gear -Strive-",
+             "prefix": "GGST/", "search": "Guilty Gear Strive",
+             "priority": ["GGST/Venom/Combos", "GGST/I-No/Combos"]},
+    "gbvsr": {"name": "Granblue Fantasy Versus: Rising",
+              "main": "Granblue Fantasy Versus: Rising", "prefix": None,
+              "search": "Granblue Fantasy Versus Rising", "priority": []},
+    "tokon": {"name": "Marvel Tokon: Fighting Souls", "main": None, "prefix": None,
+              "search": "Tokon", "priority": []},
+}
+SECTION_ORDER = ["ggst", "gbvsr", "tokon"]
+SECTION = "ggst"
+
+# Set from the chosen section by configure_section().
 MAIN_TITLE = "Guilty Gear -Strive-"
 TITLE_PREFIXES = ["GGST/"]
 
 # Fetched first, in this order, before everything else.
-PRIORITY_TITLES = [
-    "GGST/Venom/Combos",
-    "GGST/I-No/Combos",
-    MAIN_TITLE,
-]
+PRIORITY_TITLES = ["GGST/Venom/Combos", "GGST/I-No/Combos", MAIN_TITLE]
 
 API_CANDIDATES = [f"{BASE}/wiki/api.php", f"{BASE}/w/api.php"]
 
 OUTPUT_DIR = Path(os.environ.get("DUSTLOOP_OUTPUT", Path.home() / "dustloop_mirror"))
 SITE_DIR = OUTPUT_DIR / "site"
-STATE_FILE = OUTPUT_DIR / "state.json"
-STATUS_FILE = OUTPUT_DIR / "status.md"
+STATE_FILE = OUTPUT_DIR / "state-ggst.json"
+STATUS_FILE = OUTPUT_DIR / "status-ggst.md"
 LOG_FILE = OUTPUT_DIR / "mirror.log"
 
 # Politeness: about one request per second. Don't lower this, Dustloop is
@@ -235,6 +247,62 @@ def discover_pages(fetcher: Fetcher) -> Dict[str, Optional[int]]:
     return {}
 
 
+def api_first_ok(fetcher: "Fetcher", params: dict) -> Optional[dict]:
+    for api in API_CANDIDATES:
+        data = api_query(fetcher, api, params)
+        if data is not None:
+            return data
+    return None
+
+
+def configure_section(key: str, fetcher: "Fetcher", state: dict) -> Optional[str]:
+    """Point the module at one game. Looks up the game's main page and its
+    page-title prefix on the wiki when not configured, remembering the result.
+    Returns an error message if the game can't be found."""
+    global SECTION, MAIN_TITLE, TITLE_PREFIXES, PRIORITY_TITLES, STATE_FILE, STATUS_FILE
+    cfg = SECTIONS[key]
+    SECTION = key
+    STATE_FILE = OUTPUT_DIR / f"state-{key}.json"
+    STATUS_FILE = OUTPUT_DIR / f"status-{key}.md"
+    legacy = OUTPUT_DIR / "state.json"
+    if key == "ggst" and legacy.exists() and not STATE_FILE.exists():
+        legacy.replace(STATE_FILE)
+    (OUTPUT_DIR / "status.md").unlink(missing_ok=True)
+    state.update(load_state())
+
+    resolved = state.setdefault("section", {})
+    main = cfg["main"] or resolved.get("main")
+    if not main:
+        data = api_first_ok(fetcher, {
+            "action": "query", "format": "json", "list": "search",
+            "srsearch": cfg["search"], "srnamespace": "0", "srwhat": "title",
+            "srlimit": "20"})
+        hits = [h["title"] for h in (data or {}).get("query", {}).get("search", [])]
+        tops = [t for t in hits if "/" not in t]
+        if not tops:
+            return f"couldn't find a {cfg['name']} section on Dustloop (search: {hits[:5]})"
+        main = tops[0]
+    prefix = cfg["prefix"] or resolved.get("prefix")
+    if not prefix:
+        status, body = fetcher.get(title_to_url(main))
+        if status != 200:
+            return f"couldn't load {main} ({status})"
+        counts: Dict[str, int] = {}
+        for link in PAGE_LINK_RE.findall(body.decode("utf-8", "replace")):
+            seg = urllib.parse.unquote(link).split("/", 1)
+            if len(seg) == 2 and seg[1] and ":" not in seg[0]:
+                counts[seg[0]] = counts.get(seg[0], 0) + 1
+        if not counts:
+            return f"couldn't work out the page prefix for {main}"
+        prefix = max(counts, key=counts.get).replace("_", " ") + "/"
+    resolved.update({"main": main, "prefix": prefix})
+    MAIN_TITLE = main
+    TITLE_PREFIXES = [prefix]
+    PRIORITY_TITLES = list(cfg["priority"]) + [main]
+    logging.info("Section %s: main page %r, prefix %r", key, main, prefix)
+    return None
+
+
 def title_to_url(title: str) -> str:
     return f"{BASE}/w/{urllib.parse.quote(title.replace(' ', '_'), safe='/:,()!*~-_.')}"
 
@@ -243,7 +311,7 @@ def title_to_path(title: str) -> Path:
     return SITE_DIR / "w" / (title.replace(" ", "_") + ".html")
 
 
-def is_ggst_title(title: str) -> bool:
+def is_section_title(title: str) -> bool:
     return title == MAIN_TITLE or any(title.startswith(p) for p in TITLE_PREFIXES)
 
 
@@ -507,7 +575,7 @@ class Mirror:
             "Saved %s (+%d images/fonts, +%d stylesheets)", title,
             self.stats["assets"] - before["assets"], self.stats["css"] - before["css"],
         )
-        return True, [t for t in linked if is_ggst_title(t)]
+        return True, [t for t in linked if is_section_title(t)]
 
 
 # ---------------------------------------------------------------------------
@@ -524,7 +592,13 @@ EMBED_HOST_RE = re.compile(r"(?:data-)?src=\"(?:https?:)?//([^/\"]+)", re.I)
 def page_titles_on_disk() -> List[str]:
     w = SITE_DIR / "w"
     titles = []
-    for f in list((w / "GGST").rglob("*.html")) + list(w.glob("Guilty_Gear_-Strive-*.html")):
+    files = []
+    for prefix in TITLE_PREFIXES:
+        files += list((w / prefix.rstrip("/").replace(" ", "_")).rglob("*.html"))
+    main_file = title_to_path(MAIN_TITLE)
+    if main_file.exists():
+        files.append(main_file)
+    for f in files:
         titles.append(f.relative_to(w).as_posix()[:-5].replace("_", " "))
     return sorted(titles)
 
@@ -697,7 +771,7 @@ def write_status(state: dict, discovered: Dict[str, Optional[int]],
     total = len(set(discovered) | set(page_titles_on_disk()))
     embeds = ", ".join(f"{h} x{n}" for h, n in sorted(check["embeds"].items(), key=lambda x: -x[1])[:6])
     lines = [
-        "# Dustloop GGST mirror status",
+        f"# {SECTIONS[SECTION]['name']} ({SECTION}) mirror status",
         "",
         f"- Run finished: {now().strftime('%Y-%m-%d %H:%M UTC')} "
         f"(took {str(now() - started).split('.')[0]}, {fetcher.requests} requests)",
@@ -754,8 +828,8 @@ def write_status(state: dict, discovered: Dict[str, Optional[int]],
 
 
 def prune_other_games() -> None:
-    """The old wget crawl wandered into every game on Dustloop. Remove those
-    pages so the download only carries GGST."""
+    """Each game is stored separately, and the old wget crawl wandered into
+    every game on Dustloop. Remove pages that don't belong to this game."""
     import shutil
     w = SITE_DIR / "w"
     if not w.is_dir():
@@ -763,7 +837,8 @@ def prune_other_games() -> None:
     removed = 0
     for entry in w.iterdir():
         name = entry.name
-        if name == "GGST" or name.startswith("Guilty_Gear_-Strive-"):
+        keep = {p.rstrip("/").replace(" ", "_") for p in TITLE_PREFIXES}
+        if name in keep or name == title_to_path(MAIN_TITLE).name:
             continue
         if entry.is_dir():
             shutil.rmtree(entry, ignore_errors=True)
@@ -771,7 +846,7 @@ def prune_other_games() -> None:
             entry.unlink(missing_ok=True)
         removed += 1
     if removed:
-        logging.info("Removed %d non-GGST entries left by the old crawler", removed)
+        logging.info("Removed %d entries that belong to other games", removed)
 
 
 def create_index() -> None:
@@ -785,7 +860,9 @@ def create_index() -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Mirror the Dustloop GGST wiki.")
+    parser = argparse.ArgumentParser(description="Mirror sections of the Dustloop wiki.")
+    parser.add_argument("--section", choices=SECTION_ORDER, default="ggst",
+                        help="Which game to mirror (default: ggst).")
     parser.add_argument("--budget-minutes", type=float, default=None,
                         help="Stop starting new pages after this many minutes.")
     parser.add_argument("--only", nargs="+", metavar="TITLE",
@@ -807,11 +884,27 @@ def main() -> int:
     logging.info("=" * 60)
     logging.info("Dustloop mirror run starting -> %s", OUTPUT_DIR)
 
-    prune_other_games()
     started = now()
     deadline = started + timedelta(minutes=args.budget_minutes) if args.budget_minutes else None
-    state = load_state()
     fetcher = Fetcher(WAIT_SECONDS)
+    state: dict = {}
+    problem = configure_section(args.section, fetcher, state)
+    position = SECTION_ORDER.index(args.section)
+    following = SECTION_ORDER[position + 1] if position + 1 < len(SECTION_ORDER) else ""
+    if problem:
+        logging.error("Section %s: %s", args.section, problem)
+        save_state(state)
+        STATUS_FILE.write_text(f"# {SECTIONS[args.section]['name']} ({args.section})\n\n"
+                               f"- Not mirrored: {problem}\n", encoding="utf-8")
+        if os.environ.get("GITHUB_ACTIONS"):
+            print(f"::notice title=Mirror status::{args.section}: {problem}")
+        out = os.environ.get("GITHUB_OUTPUT")
+        if out:
+            with open(out, "a", encoding="utf-8") as fh:
+                fh.write(f"next_section={following}\n")
+        return 0
+    save_state(state)
+    prune_other_games()
     mirror = Mirror(fetcher, state)
 
     if args.only:
@@ -844,7 +937,7 @@ def main() -> int:
                                      "fetched": now().isoformat()}
             save_state(state)
         if not args.only:
-            # Pick up GGST pages the API didn't list (or all of them, if the
+            # Pick up this game's pages the API didn't list (or all of them, if the
             # API was unreachable).
             for t in linked:
                 if t not in seen and not title_to_path(t).exists():
@@ -870,6 +963,19 @@ def main() -> int:
     create_index()
     write_status(state, discovered, queue[i:], mirror.stats, started, fetcher,
                  mirror.failed_pages, audit(state), videos)
+
+    # Keep going on this game while there's work and progress; otherwise
+    # move on to the next game in SECTION_ORDER.
+    more_pages = i < len(queue) and mirror.stats["pages"] > 0
+    more_videos = bool(videos and videos["remaining"] and videos["downloaded"])
+    next_section = args.section if (more_pages or more_videos) else following
+    if args.only:
+        next_section = ""
+    out = os.environ.get("GITHUB_OUTPUT")
+    if out:
+        with open(out, "a", encoding="utf-8") as fh:
+            fh.write(f"next_section={next_section}\n")
+    logging.info("Next: %s", next_section or "nothing (all games done for now)")
     return 0
 
 
