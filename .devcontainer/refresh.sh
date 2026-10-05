@@ -42,7 +42,7 @@ done
 if $got_any; then
     echo "$TODAY" > "$MARKER"
     for f in dustloop_mirror/status-*.md; do [ -f "$f" ] && head -n 6 "$f" && echo; done
-    echo "[refresh] Done. Run: cd dustloop_mirror && python3 server.py   (status at /_status)"
+    echo "[refresh] Done. If the page on port 8000 doesn't load: bash .devcontainer/start.sh   (status at /_status)"
 else
     echo "[refresh] Nothing downloaded. If this is a new setup, the first run may still be going."
 fi

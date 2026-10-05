@@ -45,7 +45,10 @@ on the wiki automatically when not given. Each game is finished before the next
 one starts, and each is stored separately on the `mirror-data` release as split
 tar files (release assets have no total size cap; the Actions cache is 10 GB).
 
-In a codespace: `bash .devcontainer/refresh.sh --force` pulls every game, or
+In a codespace the server starts on port 8000 by itself, and the newest
+mirror is pulled in the background (log: `/tmp/dustloop-refresh.log`). If the
+page shows a 502, run `bash .devcontainer/start.sh` to start it.
+`bash .devcontainer/refresh.sh --force` pulls every game, or
 `MIRROR_SECTIONS="ggst" bash .devcontainer/refresh.sh --force` just one. The
 server's home page lists the games; `/_status` shows each game's report.
 
@@ -76,6 +79,22 @@ references is on disk. Pages that fail are re-queued automatically.
 `site/_media/yt/`, and the server swaps each embed for the local video. Skip
 with `--no-videos`. YouTube sometimes blocks downloads from GitHub's servers;
 failures and their reasons show in the status and are retried after 2 days.
+
+If the status shows "Sign in to confirm you're not a bot", give the workflow
+YouTube cookies:
+
+1. In a private/incognito browser window, sign in to YouTube (a spare Google
+   account is safest: YouTube can flag accounts used this way), open
+   youtube.com, then export cookies for youtube.com in Netscape `cookies.txt`
+   format with a "Get cookies.txt"-style extension, and close the window
+   without signing out (signing out invalidates them).
+2. On GitHub: repo Settings → Secrets and variables → Actions → New
+   repository secret, name `YOUTUBE_COOKIES`, paste the whole file.
+
+The next run uses them (status says "using YouTube cookies") and retries
+earlier bot-check failures right away. Cookies expire; repeat when the
+failures come back. Locally, point `DUSTLOOP_YT_COOKIES` at a cookies.txt
+outside the mirror folder.
 Downloading from YouTube is against its terms of service; this is meant for
 personal offline viewing only.
 

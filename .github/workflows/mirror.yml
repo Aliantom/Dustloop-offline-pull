@@ -63,6 +63,24 @@ jobs:
       - name: Install yt-dlp (combo videos)
         run: pip install -U yt-dlp && yt-dlp --version
 
+      # Optional: YouTube sometimes asks GitHub's machines to "sign in to
+      # confirm you're not a bot". A Netscape-format cookies.txt saved as the
+      # YOUTUBE_COOKIES repo secret lets yt-dlp get past that. It is written
+      # outside the mirror folder, so it's never uploaded with the mirror.
+      - name: Load YouTube cookies (optional)
+        env:
+          YT_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
+        run: |
+          if [ -n "$YT_COOKIES" ]; then
+            f="$RUNNER_TEMP/yt-cookies.txt"
+            umask 077
+            printf '%s\n' "$YT_COOKIES" > "$f"
+            echo "DUSTLOOP_YT_COOKIES=$f" >> "$GITHUB_ENV"
+            echo "YouTube cookies loaded ($(grep -c . "$f") lines)."
+          else
+            echo "No YOUTUBE_COOKIES secret; combo videos download without cookies."
+          fi
+
       - name: Make sure the storage release exists
         run: |
           gh release view "$RELEASE_TAG" >/dev/null 2>&1 || \
@@ -103,6 +121,10 @@ jobs:
           timeout 18000 python dustloop_mirror.py --section "$SECTION" --budget-minutes "$BUDGET"
           echo "Mirror script exited with code $?"
           exit 0
+
+      - name: Remove YouTube cookies
+        if: always()
+        run: rm -f "$RUNNER_TEMP/yt-cookies.txt"
 
       - name: Show what was downloaded
         if: always()

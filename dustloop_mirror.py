@@ -111,6 +111,27 @@ CSS_MAX_AGE = timedelta(days=7)
 YOUTUBE_MAX_HEIGHT = int(os.environ.get("DUSTLOOP_YT_HEIGHT", "360"))
 YOUTUBE_DIR_NAME = "_media/yt"
 YOUTUBE_RETRY_AFTER = timedelta(days=2)
+# Optional Netscape-format cookies.txt for yt-dlp, for when YouTube asks the
+# machine to "sign in to confirm you're not a bot". On GitHub Actions it comes
+# from the YOUTUBE_COOKIES secret. Keep it outside OUTPUT_DIR so it never ends
+# up in the published mirror.
+YOUTUBE_COOKIES = os.environ.get("DUSTLOOP_YT_COOKIES", "").strip()
+
+
+def youtube_cookies() -> Optional[Path]:
+    if not YOUTUBE_COOKIES:
+        return None
+    path = Path(YOUTUBE_COOKIES).expanduser()
+    if not path.is_file() or path.stat().st_size == 0:
+        logging.warning("DUSTLOOP_YT_COOKIES is set but %s is missing or empty; "
+                        "downloading videos without cookies", path)
+        return None
+    try:
+        path.resolve().relative_to(OUTPUT_DIR.resolve())
+    except ValueError:
+        return path
+    logging.warning("Not using cookies file %s: it is inside the mirror folder", path)
+    return None
 # Matches embeds, links and thumbnails; keep in sync with server.py.
 YOUTUBE_ID_RE = re.compile(
     r"(?:youtube(?:-nocookie)?\.com/(?:embed/|watch\?v=|shorts/|v/)|youtu\.be/|ytimg\.com/vi/)"
@@ -755,14 +776,17 @@ def download_youtube(state: dict, deadline: Optional[datetime]) -> dict:
     import shutil
     import subprocess
     ids = combos_youtube_ids()
+    cookies = youtube_cookies()
     result = {"total": len(ids), "downloaded": 0, "failed_now": 0,
-              "remaining": 0, "skipped": None}
+              "remaining": 0, "skipped": None, "cookies": bool(cookies)}
     todo = []
     for vid in ids:
         if youtube_file(vid).exists():
             continue
         failed = state["yt_failed"].get(vid)
-        if failed and now() - datetime.fromisoformat(failed["when"]) < YOUTUBE_RETRY_AFTER:
+        # A failure without cookies is retried right away once cookies exist.
+        if (failed and now() - datetime.fromisoformat(failed["when"]) < YOUTUBE_RETRY_AFTER
+                and not (cookies and not failed.get("cookies"))):
             continue
         todo.append(vid)
     result["remaining"] = len(todo)
@@ -788,6 +812,8 @@ def download_youtube(state: dict, deadline: Optional[datetime]) -> dict:
                "--merge-output-format", "mp4", "--max-filesize", "80M",
                "--sleep-requests", "1", "-o", str(out.with_suffix(".%(ext)s")),
                f"https://www.youtube.com/watch?v={vid}"]
+        if cookies:
+            cmd[1:1] = ["--cookies", str(cookies)]
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
             ok = proc.returncode == 0 and out.exists()
@@ -801,7 +827,8 @@ def download_youtube(state: dict, deadline: Optional[datetime]) -> dict:
             logging.info("Video %s saved (%s)", vid, ids[vid][0])
         else:
             result["failed_now"] += 1
-            state["yt_failed"][vid] = {"when": now().isoformat(), "why": why}
+            state["yt_failed"][vid] = {"when": now().isoformat(), "why": why,
+                                       "cookies": bool(cookies)}
             streak += 1
             logging.warning("Video %s failed: %s", vid, why)
             if streak >= 8:
@@ -836,7 +863,8 @@ def write_status(state: dict, discovered: Dict[str, Optional[int]],
         *([f"- Combo videos (YouTube, Combos pages): "
            f"**{sum(1 for v in combos_youtube_ids() if youtube_file(v).exists())} / {videos['total']}** "
            f"downloaded; this run +{videos['downloaded']}, {videos['failed_now']} failed"
-           + (f" ({videos['skipped']})" if videos.get('skipped') else "")]
+           + (f" ({videos['skipped']})" if videos.get('skipped') else "")
+           + ("; using YouTube cookies" if videos.get("cookies") else "; no YouTube cookies")]
           if videos else []),
         f"- This run: {stats['pages']} pages, {stats['assets']} images/fonts, "
         f"{stats['css']} stylesheets, {stats['failed']} failed requests",
@@ -852,6 +880,9 @@ def write_status(state: dict, discovered: Dict[str, Optional[int]],
             reasons[f["why"]] = reasons.get(f["why"], 0) + 1
         lines += ["", f"Videos that failed ({len(yt_fail)}), by reason:", ""] + [
             f"- {n}x {why}" for why, n in sorted(reasons.items(), key=lambda x: -x[1])[:5]]
+        if not videos.get("cookies") and any("not a bot" in w for w in reasons):
+            lines += ["", "YouTube is asking for sign-in: add a cookies.txt as the "
+                      "YOUTUBE_COOKIES repo secret (see readme)."]
     for sample in check.get("samples", []):
         lines += ["", "Markup around a missing file: " + sample.replace("%", "%25")[:900]]
     if check["broken"]:
