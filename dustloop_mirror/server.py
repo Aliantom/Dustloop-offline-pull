@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Serves the dustloop mirror, translating wiki URLs to local file paths."""
-import html, os, re, sys
+import html, json, os, re, sys
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse, unquote
 
@@ -161,7 +161,10 @@ PAGE_STYLE = ("body{font-family:system-ui,sans-serif;max-width:52rem;margin:2rem
               "padding:0 1rem;line-height:1.5;color:#222;background:#fafafa}"
               "h1{font-size:1.5rem}li{margin:.15rem 0}a{color:#b0002a}"
               ".games a{display:block;font-size:1.2rem;padding:.6rem .9rem;margin:.4rem 0;"
-              "background:#fff;border:1px solid #ddd;border-radius:8px;text-decoration:none}")
+              "background:#fff;border:1px solid #ddd;border-radius:8px;text-decoration:none}"
+              ".games small{display:block;font-size:.85rem;color:#666}"
+              ".games .missing{display:block;font-size:1.2rem;padding:.6rem .9rem;margin:.4rem 0;"
+              "border:1px dashed #ccc;border-radius:8px;color:#999}")
 
 
 def simple_page(title, body_html):
@@ -171,13 +174,50 @@ def simple_page(title, body_html):
             f"<body>{body_html}</body></html>").encode("utf-8")
 
 
+# The mirrored games, in order. Keep in sync with SECTIONS in dustloop_mirror.py.
+GAMES = [("ggst", "Guilty Gear -Strive-", "Guilty Gear -Strive-"),
+         ("gbvsr", "Granblue Fantasy Versus: Rising", "Granblue Fantasy Versus: Rising"),
+         ("tokon", "Marvel Tokon: Fighting Souls", "MTFS")]
+
+
+def _game_main(key, default):
+    """The game's main page title, as resolved on the wiki by the mirror script."""
+    try:
+        with open(os.path.join(os.getcwd(), f"state-{key}.json"), encoding="utf-8") as f:
+            return json.load(f).get("section", {}).get("main") or default
+    except (OSError, ValueError):
+        return default
+
+
+def _game_summary(key):
+    """The "Pages fully rendered" line from the game's status report."""
+    try:
+        with open(os.path.join(os.getcwd(), f"status-{key}.md"), encoding="utf-8") as f:
+            for line in f:
+                if "fully rendered" in line:
+                    m = re.search(r"\*\*(\d+ / \d+)\*\*", line)
+                    return f"{m.group(1)} pages" if m else ""
+    except OSError:
+        pass
+    return ""
+
+
 def home_page():
-    """List each mirrored game's main page (top-level pages under site/w)."""
-    w = os.path.join(os.getcwd(), "site", "w")
-    games = sorted(f[:-5] for f in os.listdir(w) if f.endswith(".html")) if os.path.isdir(w) else []
-    links = "".join(f'<a href="/w/{html.escape(g)}">{html.escape(g.replace("_", " "))}</a>' for g in games)
+    """Link each mirrored game's main page; games not downloaded are greyed out."""
+    items = []
+    for key, name, default_main in GAMES:
+        main = _game_main(key, default_main)
+        rel = "site/w/" + main.replace(" ", "_") + ".html"
+        summary = _game_summary(key)
+        if os.path.isfile(os.path.join(os.getcwd(), rel)):
+            href = "/w/" + main.replace(" ", "_")
+            items.append(f'<a href="{html.escape(href)}">{html.escape(name)}'
+                         f'<small>{html.escape(summary)}</small></a>')
+        else:
+            items.append(f'<span class="missing">{html.escape(name)}'
+                         '<small>not downloaded yet</small></span>')
     return simple_page("Dustloop mirror", "<h1>Dustloop mirror</h1>"
-                       f"<div class='games'>{links or '<p>No games downloaded yet.</p>'}</div>"
+                       f"<div class='games'>{''.join(items)}</div>"
                        "<p><a href='/_status'>Mirror status</a></p>")
 
 
