@@ -3,6 +3,9 @@
 dustloop_mirror/*
 !dustloop_mirror/server.py
 
+supercombo_mirror/*
+!supercombo_mirror/server.py
+
 # Old artifacts and logs at workspace root
 *.tar.gz
 *.log
